@@ -1,5 +1,6 @@
 streamlit
-opencv-python
-Pillow
-numpy
 mtcnn
+numpy
+opencv-python-headless
+Pillow
+tifffile
