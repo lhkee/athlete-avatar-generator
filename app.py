@@ -8,13 +8,14 @@ import zipfile
 from io import BytesIO
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
-
 st.title("🏋️ Athlete Image Generator")
 st.markdown("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
 
-# Use absolute path to haarcascade
+# Load and validate Haar cascade
 CASCADE_PATH = os.path.abspath("haarcascade_frontalface_default.xml")
 face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
+if face_cascade.empty():
+    raise ValueError("🚫 Failed to load face cascade. Make sure 'haarcascade_frontalface_default.xml' is in the root directory and is not empty.")
 
 # Helper functions
 def detect_face(img):
@@ -67,6 +68,7 @@ hero_sizes = st.multiselect("Hero Sizes", ["1200x1165", "1500x920"], default=["1
 if st.button("✅ Generate Avatars") and avatar_images:
     zip_data = process_and_save(avatar_images, avatar_sizes, "avatar")
     st.download_button("Download Avatars ZIP", zip_data, "avatars.zip", mime="application/zip")
+
 if st.button("✅ Generate Hero Images") and hero_images:
     zip_data = process_and_save(hero_images, hero_sizes, "hero")
     st.download_button("Download Hero ZIP", zip_data, "heroes.zip", mime="application/zip")
