@@ -1,114 +1,72 @@
 
-import os
-import io
-import zipfile
 import streamlit as st
-import numpy as np
-from PIL import Image
+import os
 import cv2
+from PIL import Image
+import numpy as np
+import zipfile
+from io import BytesIO
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
+
 st.title("🏋️ Athlete Image Generator")
+st.markdown("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
 
-avatar_files = st.file_uploader("📤 Upload Front Profile Images", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True, key="front")
-hero_files = st.file_uploader("📤 Upload Side Profile Images", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True, key="side")
-
-avatar_sizes = ["256x256", "500x345"]
-hero_sizes = ["1200x1165", "1500x920"]
-
-selected_avatar_sizes = st.multiselect("Avatar Export Sizes", avatar_sizes, default=avatar_sizes)
-selected_hero_sizes = st.multiselect("Hero Export Sizes", hero_sizes, default=hero_sizes)
-
-generated_images = {}
-
-CASCADE_PATH = os.path.join(os.path.dirname(__file__), "haarcascade_frontalface_default.xml")
+# Use absolute path to haarcascade
+CASCADE_PATH = os.path.abspath("haarcascade_frontalface_default.xml")
 face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
 
-def detect_and_crop_face(pil_img):
-    try:
-        img_rgba = np.array(pil_img)
-        h, w = img_rgba.shape[:2]
-        img_rgb = cv2.cvtColor(img_rgba, cv2.COLOR_RGBA2RGB)
-        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+# Helper functions
+def detect_face(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+    return faces
 
-        faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=3)
-        if len(faces) == 0:
-            st.warning("⚠️ No face detected, using original image")
-            return pil_img
+def crop_to_face(image: Image.Image, target_size):
+    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGBA2BGR)
+    faces = detect_face(img_cv)
+    if len(faces) == 0:
+        return image.resize(target_size)
+    (x, y, w, h) = faces[0]
+    cx, cy = x + w//2, y + h//2
+    size = max(target_size)
+    left = max(cx - size//2, 0)
+    top = max(cy - size//2, 0)
+    right = left + size
+    bottom = top + size
+    cropped = img_cv[top:bottom, left:right]
+    cropped_img = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGBA))
+    return cropped_img.resize(target_size)
 
-        x, y, fw, fh = sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]
-        buffer = int(0.6 * fh)
-        left = max(0, x - buffer)
-        top = max(0, y - buffer)
-        right = min(img_rgb.shape[1], x + fw + buffer)
-        bottom = min(img_rgb.shape[0], y + fh + buffer)
-
-        cropped = img_rgb[top:bottom, left:right]
-        return Image.fromarray(cropped).convert("RGBA")
-    except Exception as e:
-        st.error(f"Face crop error: {e}")
-        return pil_img
-
-def place_on_canvas(cropped_img, size_str):
-    try:
-        target_w, target_h = map(int, size_str.split("x"))
-        canvas = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-        aspect_ratio = cropped_img.width / cropped_img.height
-        if target_w / target_h > aspect_ratio:
-            new_h = target_h
-            new_w = int(aspect_ratio * new_h)
-        else:
-            new_w = target_w
-            new_h = int(new_w / aspect_ratio)
-        resized = cropped_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        x = (target_w - new_w) // 2
-        y = (target_h - new_h) // 2
-        canvas.paste(resized, (x, y), resized)
-        return canvas
-    except Exception as e:
-        st.error(f"Canvas error: {e}")
-        return cropped_img
-
-def add_to_zip(zip_buffer, filename, image):
-    img_bytes = io.BytesIO()
-    image.save(img_bytes, format="PNG", optimize=True)
-    zip_buffer.writestr(filename, img_bytes.getvalue())
-
-def process_images(files, sizes, label):
-    zip_buffer = io.BytesIO()
+def process_and_save(images, sizes, label):
+    zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zipf:
-        for file in files:
-            try:
-                base = file.name.rsplit(".", 1)[0]
-                name = base.split("-")[0]
-                img = Image.open(file).convert("RGBA")
-                cropped = detect_and_crop_face(img)
-                for size in sizes:
-                    export = place_on_canvas(cropped, size)
-                    filename = f"{name}-{label}_{size}.png"
-                    if name not in generated_images:
-                        generated_images[name] = []
-                    generated_images[name].append((filename, export))
-                    add_to_zip(zipf, filename, export)
-                st.success(f"✅ Processed: {file.name}")
-            except Exception as e:
-                st.error(f"❌ Error with {file.name}: {e}")
-    return zip_buffer
+        for img_file in images:
+            filename = os.path.splitext(img_file.name)[0]
+            base_name = filename.split("-")[0]
+            for size in sizes:
+                w, h = map(int, size.split("x"))
+                image = Image.open(img_file).convert("RGBA")
+                resized = crop_to_face(image, (w, h))
+                out_filename = f"{base_name}-{label}_{w}x{h}.png"
+                buffer = BytesIO()
+                resized.save(buffer, format="PNG")
+                zipf.writestr(out_filename, buffer.getvalue())
+    return zip_buffer.getvalue()
 
-if avatar_files and st.button("🎨 Generate Avatars"):
-    zip_data = process_images(avatar_files, selected_avatar_sizes, "avatar")
-    st.download_button("⬇️ Download All Avatars", data=zip_data.getvalue(), file_name="avatars.zip", mime="application/zip")
+# Upload UI
+avatar_images = st.file_uploader("📤 Upload Front Profile Image(s) for Avatar", accept_multiple_files=True, type=["png", "jpg", "jpeg", "tif", "tiff"])
+hero_images = st.file_uploader("📤 Upload Side Profile Image(s) for Hero", accept_multiple_files=True, type=["png", "jpg", "jpeg", "tif", "tiff"])
 
-if hero_files and st.button("🎨 Generate Hero Images"):
-    zip_data = process_images(hero_files, selected_hero_sizes, "hero")
-    st.download_button("⬇️ Download All Hero Images", data=zip_data.getvalue(), file_name="heroes.zip", mime="application/zip")
+# Size selectors
+st.subheader("🛠 Export Sizes (Default checked)")
+avatar_sizes = st.multiselect("Avatar Sizes", ["256x256", "500x345"], default=["256x256", "500x345"])
+hero_sizes = st.multiselect("Hero Sizes", ["1200x1165", "1500x920"], default=["1200x1165", "1500x920"])
 
-if generated_images:
-    st.markdown("### 🖼 Download Individual Files")
-    for name, items in generated_images.items():
-        st.subheader(name)
-        for fname, img in items:
-            img_bytes = io.BytesIO()
-            img.save(img_bytes, format="PNG", optimize=True)
-            st.image(img, caption=fname, width=200)
-            st.download_button(f"⬇️ Download {fname}", data=img_bytes.getvalue(), file_name=fname, mime="image/png")
+# Process buttons
+if st.button("✅ Generate Avatars") and avatar_images:
+    zip_data = process_and_save(avatar_images, avatar_sizes, "avatar")
+    st.download_button("Download Avatars ZIP", zip_data, "avatars.zip", mime="application/zip")
+if st.button("✅ Generate Hero Images") and hero_images:
+    zip_data = process_and_save(hero_images, hero_sizes, "hero")
+    st.download_button("Download Hero ZIP", zip_data, "heroes.zip", mime="application/zip")
