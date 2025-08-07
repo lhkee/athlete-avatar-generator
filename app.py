@@ -1,31 +1,24 @@
 
 import streamlit as st
-from PIL import Image
-import os
 import numpy as np
-from mtcnn import MTCNN
-import zipfile
+import face_recognition
+from PIL import Image
 import io
+import os
+import zipfile
 import tifffile
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
-
 st.title("🏋️ Athlete Avatar & Hero Image Generator")
 st.write("Upload front and side profile images in TIFF, PNG, or JPG.")
 
-# Uploaders
 front_files = st.file_uploader("Upload Front Profile Images", type=["tif", "tiff", "png", "jpg", "jpeg"], accept_multiple_files=True, key="front")
 side_files = st.file_uploader("Upload Side Profile Images", type=["tif", "tiff", "png", "jpg", "jpeg"], accept_multiple_files=True, key="side")
 
-# Export options
-st.subheader("Select Export Sizes")
 avatar_sizes = [(256, 256), (500, 345)]
 hero_sizes = [(1200, 1165), (1500, 920)]
 selected_avatar_sizes = [s for s in avatar_sizes if st.checkbox(f"Avatar {s[0]}x{s[1]}", value=True)]
 selected_hero_sizes = [s for s in hero_sizes if st.checkbox(f"Hero {s[0]}x{s[1]}", value=True)]
-
-# Initialize face detector
-detector = MTCNN()
 
 def load_image(file):
     try:
@@ -40,16 +33,14 @@ def load_image(file):
         return None
 
 def detect_face(image):
-    array = np.array(image)
-    result = detector.detect_faces(array)
-    if result:
-        x, y, w, h = result[0]["box"]
-        margin = int(0.4 * max(w, h))
-        x1 = max(x - margin, 0)
-        y1 = max(y - margin, 0)
-        x2 = x + w + margin
-        y2 = y + h + margin
-        return image.crop((x1, y1, x2, y2))
+    array = np.array(image.convert("RGB"))
+    locations = face_recognition.face_locations(array)
+    if locations:
+        top, right, bottom, left = locations[0]
+        h_margin = int(0.4 * (right - left))
+        v_margin = int(0.4 * (bottom - top))
+        return image.crop((max(left - h_margin, 0), max(top - v_margin, 0),
+                           min(right + h_margin, image.width), min(bottom + v_margin, image.height)))
     return None
 
 def clean_filename(filename):
