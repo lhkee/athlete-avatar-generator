@@ -1,120 +1,76 @@
 
 import streamlit as st
+from PIL import Image
+import io
 import os
-import cv2
-from PIL import Image, UnidentifiedImageError
 import numpy as np
 import zipfile
-from io import BytesIO
-import traceback
+from facenet_pytorch import MTCNN
+import tempfile
+from datetime import datetime
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
-st.title("🏋️ Athlete Image Generator")
-st.markdown("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
+st.title("🏋️‍♂️ Athlete Image Generator")
+st.write("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
 
-# Use OpenCV built-in path
-CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
-if face_cascade.empty():
-    st.error("🚫 Failed to load face cascade.")
-    print("ERROR: Failed to load OpenCV cascade")
-    st.stop()
+# Load MTCNN
+mtcnn = MTCNN(keep_all=False, device='cpu')
 
-def detect_face(img):
-    try:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-        print(f"Detected {len(faces)} face(s)")
-        return faces
-    except Exception as e:
-        print("Face detection error:", e)
-        print(traceback.format_exc())
-        return []
-
-def crop_to_face(image: Image.Image, target_size):
-    try:
-        print(f"Image size: {image.size}, mode: {image.mode}")
-        img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGBA2BGR)
-        faces = detect_face(img_cv)
-        if len(faces) == 0:
-            print("No face detected, resizing directly")
-            return image.resize(target_size)
-        (x, y, w, h) = faces[0]
-        cx, cy = x + w//2, y + h//2
-        size = max(target_size)
-        left = max(cx - size//2, 0)
-        top = max(cy - size//2, 0)
-        right = left + size
-        bottom = top + size
-        cropped = img_cv[top:bottom, left:right]
-        cropped_img = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGBA))
-        return cropped_img.resize(target_size)
-    except Exception as e:
-        print("Cropping error:", e)
-        print(traceback.format_exc())
-        return image
-
-def process_and_save(images, sizes, label):
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zipf:
-        for img_file in images:
-            try:
-                print(f"Processing file: {img_file.name}")
-                filename = os.path.splitext(img_file.name)[0]
-                base_name = filename.split("-")[0]
-                try:
-                    image = Image.open(img_file).convert("RGBA")
-                except UnidentifiedImageError:
-                    st.error(f"Unrecognized image file: {img_file.name}")
-                    print(f"UnidentifiedImageError: {img_file.name}")
-                    continue
-                except Exception as e:
-                    st.error(f"Failed to open image: {img_file.name}")
-                    print("Open error:", e)
-                    print(traceback.format_exc())
-                    continue
-                for size in sizes:
-                    w, h = map(int, size.split("x"))
-                    resized = crop_to_face(image, (w, h))
-                    out_filename = f"{base_name}-{label}_{w}x{h}.png"
-                    buffer = BytesIO()
-                    resized.save(buffer, format="PNG")
-                    zipf.writestr(out_filename, buffer.getvalue())
-                    print(f"✅ Created: {out_filename}")
-            except Exception as e:
-                st.error(f"Error processing file: {img_file.name}")
-                print("Processing error:", e)
-                print(traceback.format_exc())
-    return zip_buffer.getvalue()
-
-# Upload UI
-avatar_images = st.file_uploader("📤 Upload Front Profile Image(s) for Avatar", accept_multiple_files=True, type=["png", "jpg", "jpeg", "tif", "tiff"])
-hero_images = st.file_uploader("📤 Upload Side Profile Image(s) for Hero", accept_multiple_files=True, type=["png", "jpg", "jpeg", "tif", "tiff"])
+# File upload widgets
+front_files = st.file_uploader("📤 Upload Front Profile Image(s) for Avatar", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True)
+side_files = st.file_uploader("📤 Upload Side Profile Image(s) for Hero", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True)
 
 # Size selectors
 st.subheader("🛠 Export Sizes (Default checked)")
-avatar_sizes = st.multiselect("Avatar Sizes", ["256x256", "500x345"], default=["256x256", "500x345"])
-hero_sizes = st.multiselect("Hero Sizes", ["1200x1165", "1500x920"], default=["1200x1165", "1500x920"])
+avatar_sizes = st.multiselect("Avatar Sizes", options=["256x256", "500x345"], default=["256x256", "500x345"])
+hero_sizes = st.multiselect("Hero Sizes", options=["1200x1165", "1500x920"], default=["1200x1165", "1500x920"])
 
-# Process buttons
-if st.button("✅ Generate Avatars") and avatar_images:
-    try:
-        st.info("🔄 Generating avatar images...")
-        print("Clicked: Generate Avatars")
-        zip_data = process_and_save(avatar_images, avatar_sizes, "avatar")
-        st.download_button("⬇️ Download Avatars ZIP", zip_data, "avatars.zip", mime="application/zip")
-    except Exception as e:
-        st.error("Unhandled error during avatar generation.")
-        print("Unhandled avatar error:", e)
-        print(traceback.format_exc())
+# Utility function to crop and resize
+def generate_face_crop(img, sizes, suffix):
+    results = []
+    boxes, _ = mtcnn.detect(img)
+    if boxes is None:
+        return []
+    box = boxes[0]  # single face assumed
+    x1, y1, x2, y2 = map(int, box)
+    face_crop = img.crop((x1, y1, x2, y2))
+    for size in sizes:
+        w, h = map(int, size.split('x'))
+        resized = face_crop.resize((w, h), Image.LANCZOS)
+        results.append((resized, f"{suffix}_{size}.png"))
+    return results
 
-if st.button("✅ Generate Hero Images") and hero_images:
+# TIFF conversion function
+def convert_tif_to_rgb(image_file):
     try:
-        st.info("🔄 Generating hero images...")
-        print("Clicked: Generate Hero Images")
-        zip_data = process_and_save(hero_images, hero_sizes, "hero")
-        st.download_button("⬇️ Download Hero ZIP", zip_data, "heroes.zip", mime="application/zip")
-    except Exception as e:
-        st.error("Unhandled error during hero generation.")
-        print("Unhandled hero error:", e)
-        print(traceback.format_exc())
+        img = Image.open(image_file)
+        return img.convert("RGB")
+    except:
+        return None
+
+# Generation and download logic
+if st.button("✅ Generate Images"):
+    all_outputs = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for files, category, sizes in [(front_files, "avatar", avatar_sizes), (side_files, "hero", hero_sizes)]:
+            for file in files:
+                filename = os.path.splitext(file.name)[0]
+                base_filename = filename.split('-')[0]  # strip suffix
+                image = convert_tif_to_rgb(file)
+                if image is None:
+                    st.error(f"❌ Could not read file: {file.name}")
+                    continue
+                results = generate_face_crop(image, sizes, f"{base_filename}-{category}")
+                for img, name in results:
+                    save_path = os.path.join(temp_dir, name)
+                    img.save(save_path, format="PNG")
+                    all_outputs.append((name, save_path))
+        if all_outputs:
+            zip_path = os.path.join(temp_dir, "athlete_images.zip")
+            with zipfile.ZipFile(zip_path, "w") as zipf:
+                for name, path in all_outputs:
+                    zipf.write(path, arcname=name)
+            with open(zip_path, "rb") as f:
+                st.download_button("📦 Download All as ZIP", f, file_name="athlete_images.zip")
+        else:
+            st.warning("⚠️ No images were processed.")
