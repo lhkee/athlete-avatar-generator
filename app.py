@@ -24,7 +24,7 @@ hero_sizes = st.multiselect("Hero Sizes", options=["1200x1165", "1500x920"], def
 
 def resize_and_export(image, size_str):
     w, h = map(int, size_str.split("x"))
-    resized = image.resize((w, h), Image.ANTIALIAS)
+    resized = image.resize((w, h), Image.Resampling.LANCZOS)
     output = io.BytesIO()
     resized.save(output, format="PNG", optimize=True)
     return output.getvalue()
