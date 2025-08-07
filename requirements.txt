@@ -1,5 +1,1 @@
-streamlit
-facenet-pytorch
-Pillow
-torch
-torchvision
+<REQUIREMENTS_TXT_CONTENT>
