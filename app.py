@@ -1,3 +1,4 @@
+
 import os
 import io
 import zipfile
@@ -20,7 +21,8 @@ selected_hero_sizes = st.multiselect("Hero Export Sizes", hero_sizes, default=he
 
 generated_images = {}
 
-face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+CASCADE_PATH = os.path.join(os.path.dirname(__file__), "haarcascade_frontalface_default.xml")
+face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
 
 def detect_and_crop_face(pil_img):
     try:
@@ -32,7 +34,7 @@ def detect_and_crop_face(pil_img):
         faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=3)
         if len(faces) == 0:
             st.warning("⚠️ No face detected, using original image")
-            return pil_img  # fallback
+            return pil_img
 
         x, y, fw, fh = sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]
         buffer = int(0.6 * fh)
