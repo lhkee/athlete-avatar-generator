@@ -2,7 +2,7 @@
 import streamlit as st
 import os
 import cv2
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 import numpy as np
 import zipfile
 from io import BytesIO
@@ -16,27 +16,28 @@ st.markdown("Upload front (avatar) or side (hero) profile images below. The app 
 CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
 if face_cascade.empty():
-    st.error("🚫 Failed to load face cascade. Ensure OpenCV is installed correctly.")
+    st.error("🚫 Failed to load face cascade.")
+    print("ERROR: Failed to load OpenCV cascade")
     st.stop()
 
 def detect_face(img):
     try:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-        st.write(f"🔍 Detected {len(faces)} face(s)")
+        print(f"Detected {len(faces)} face(s)")
         return faces
     except Exception as e:
-        st.error(f"Face detection error: {e}")
-        st.text(traceback.format_exc())
+        print("Face detection error:", e)
+        print(traceback.format_exc())
         return []
 
 def crop_to_face(image: Image.Image, target_size):
     try:
-        st.write(f"Original image size: {image.size}, mode: {image.mode}")
+        print(f"Image size: {image.size}, mode: {image.mode}")
         img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGBA2BGR)
         faces = detect_face(img_cv)
         if len(faces) == 0:
-            st.warning("⚠️ No face detected, resizing directly")
+            print("No face detected, resizing directly")
             return image.resize(target_size)
         (x, y, w, h) = faces[0]
         cx, cy = x + w//2, y + h//2
@@ -45,13 +46,12 @@ def crop_to_face(image: Image.Image, target_size):
         top = max(cy - size//2, 0)
         right = left + size
         bottom = top + size
-        st.write(f"Cropping area: {(left, top, right, bottom)}")
         cropped = img_cv[top:bottom, left:right]
         cropped_img = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGBA))
         return cropped_img.resize(target_size)
     except Exception as e:
-        st.error(f"Cropping error: {e}")
-        st.text(traceback.format_exc())
+        print("Cropping error:", e)
+        print(traceback.format_exc())
         return image
 
 def process_and_save(images, sizes, label):
@@ -59,10 +59,20 @@ def process_and_save(images, sizes, label):
     with zipfile.ZipFile(zip_buffer, "w") as zipf:
         for img_file in images:
             try:
-                st.write(f"📂 Processing: {img_file.name}")
+                print(f"Processing file: {img_file.name}")
                 filename = os.path.splitext(img_file.name)[0]
                 base_name = filename.split("-")[0]
-                image = Image.open(img_file).convert("RGBA")
+                try:
+                    image = Image.open(img_file).convert("RGBA")
+                except UnidentifiedImageError:
+                    st.error(f"Unrecognized image file: {img_file.name}")
+                    print(f"UnidentifiedImageError: {img_file.name}")
+                    continue
+                except Exception as e:
+                    st.error(f"Failed to open image: {img_file.name}")
+                    print("Open error:", e)
+                    print(traceback.format_exc())
+                    continue
                 for size in sizes:
                     w, h = map(int, size.split("x"))
                     resized = crop_to_face(image, (w, h))
@@ -70,10 +80,11 @@ def process_and_save(images, sizes, label):
                     buffer = BytesIO()
                     resized.save(buffer, format="PNG")
                     zipf.writestr(out_filename, buffer.getvalue())
-                    st.success(f"✅ Created: {out_filename}")
+                    print(f"✅ Created: {out_filename}")
             except Exception as e:
-                st.error(f"Processing error for {img_file.name}: {e}")
-                st.text(traceback.format_exc())
+                st.error(f"Error processing file: {img_file.name}")
+                print("Processing error:", e)
+                print(traceback.format_exc())
     return zip_buffer.getvalue()
 
 # Upload UI
@@ -89,17 +100,21 @@ hero_sizes = st.multiselect("Hero Sizes", ["1200x1165", "1500x920"], default=["1
 if st.button("✅ Generate Avatars") and avatar_images:
     try:
         st.info("🔄 Generating avatar images...")
+        print("Clicked: Generate Avatars")
         zip_data = process_and_save(avatar_images, avatar_sizes, "avatar")
         st.download_button("⬇️ Download Avatars ZIP", zip_data, "avatars.zip", mime="application/zip")
     except Exception as e:
-        st.error(f"Unhandled error: {e}")
-        st.text(traceback.format_exc())
+        st.error("Unhandled error during avatar generation.")
+        print("Unhandled avatar error:", e)
+        print(traceback.format_exc())
 
 if st.button("✅ Generate Hero Images") and hero_images:
     try:
         st.info("🔄 Generating hero images...")
+        print("Clicked: Generate Hero Images")
         zip_data = process_and_save(hero_images, hero_sizes, "hero")
         st.download_button("⬇️ Download Hero ZIP", zip_data, "heroes.zip", mime="application/zip")
     except Exception as e:
-        st.error(f"Unhandled error: {e}")
-        st.text(traceback.format_exc())
+        st.error("Unhandled error during hero generation.")
+        print("Unhandled hero error:", e)
+        print(traceback.format_exc())
