@@ -1,6 +1,5 @@
 streamlit
-face_recognition
-dlib==19.24.2
+numpy
 Pillow
 tifffile
-numpy
+opencv-python-headless

@@ -1,7 +1,7 @@
 
 import streamlit as st
 import numpy as np
-import face_recognition
+import cv2
 from PIL import Image
 import io
 import os
@@ -20,6 +20,27 @@ hero_sizes = [(1200, 1165), (1500, 920)]
 selected_avatar_sizes = [s for s in avatar_sizes if st.checkbox(f"Avatar {s[0]}x{s[1]}", value=True)]
 selected_hero_sizes = [s for s in hero_sizes if st.checkbox(f"Hero {s[0]}x{s[1]}", value=True)]
 
+face_proto = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt"
+face_model = "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000_fp16.caffemodel"
+
+@st.cache_resource
+def load_dnn_model():
+    try:
+        proto_path = "deploy.prototxt"
+        model_path = "res10_300x300_ssd_iter_140000.caffemodel"
+        if not os.path.exists(proto_path):
+            import urllib.request
+            urllib.request.urlretrieve(face_proto, proto_path)
+        if not os.path.exists(model_path):
+            import urllib.request
+            urllib.request.urlretrieve(face_model, model_path)
+        return cv2.dnn.readNetFromCaffe(proto_path, model_path)
+    except Exception as e:
+        st.error(f"❌ Failed to load DNN model: {e}")
+        return None
+
+net = load_dnn_model()
+
 def load_image(file):
     try:
         if file.name.lower().endswith((".tif", ".tiff")):
@@ -32,15 +53,25 @@ def load_image(file):
         st.error(f"❌ Failed to load image: {file.name}, Error: {e}")
         return None
 
-def detect_face(image):
-    array = np.array(image.convert("RGB"))
-    locations = face_recognition.face_locations(array)
-    if locations:
-        top, right, bottom, left = locations[0]
-        h_margin = int(0.4 * (right - left))
-        v_margin = int(0.4 * (bottom - top))
-        return image.crop((max(left - h_margin, 0), max(top - v_margin, 0),
-                           min(right + h_margin, image.width), min(bottom + v_margin, image.height)))
+def detect_face_dnn(image):
+    try:
+        array = np.array(image.convert("RGB"))
+        h, w = array.shape[:2]
+        blob = cv2.dnn.blobFromImage(array, 1.0, (300, 300), [104, 117, 123], False, False)
+        net.setInput(blob)
+        detections = net.forward()
+        confidence_threshold = 0.5
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > confidence_threshold:
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                (x1, y1, x2, y2) = box.astype("int")
+                h_margin = int(0.4 * (x2 - x1))
+                v_margin = int(0.4 * (y2 - y1))
+                return image.crop((max(x1 - h_margin, 0), max(y1 - v_margin, 0),
+                                   min(x2 + h_margin, w), min(y2 + v_margin, h)))
+    except Exception as e:
+        st.error(f"❌ Face detection error: {e}")
     return None
 
 def clean_filename(filename):
@@ -57,7 +88,7 @@ def process_and_export(files, sizes, label):
             image = load_image(file)
             if image is None:
                 continue
-            face = detect_face(image)
+            face = detect_face_dnn(image)
             if face is None:
                 st.warning(f"⚠️ No face detected in {file.name}")
                 continue
