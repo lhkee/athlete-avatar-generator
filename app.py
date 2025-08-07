@@ -11,13 +11,13 @@ st.set_page_config(page_title="Athlete Image Generator", layout="centered")
 st.title("🏋️ Athlete Image Generator")
 st.markdown("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
 
-# Load and validate Haar cascade
-CASCADE_PATH = os.path.abspath("haarcascade_frontalface_default.xml")
+# Use OpenCV built-in path
+CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
-if face_cascade.empty():
-    raise ValueError("🚫 Failed to load face cascade. Make sure 'haarcascade_frontalface_default.xml' is in the root directory and is not empty.")
 
-# Helper functions
+if face_cascade.empty():
+    raise IOError("🚫 OpenCV failed to load built-in haarcascade_frontalface_default.xml.")
+
 def detect_face(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, 1.1, 4)
