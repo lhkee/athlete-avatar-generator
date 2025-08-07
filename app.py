@@ -5,13 +5,11 @@ import streamlit as st
 import numpy as np
 from PIL import Image
 import cv2
+import mediapipe as mp
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
-
 st.title("🏋️ Athlete Image Generator")
-st.markdown("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
 
-# Upload images
 avatar_files = st.file_uploader("📤 Upload Front Profile Images", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True, key="front")
 hero_files = st.file_uploader("📤 Upload Side Profile Images", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True, key="side")
 
@@ -23,36 +21,78 @@ selected_hero_sizes = st.multiselect("Hero Export Sizes", hero_sizes, default=he
 
 generated_images = {}
 
-# Load local haarcascade
-HAAR_PATH = "haarcascade_frontalface_default.xml"
-if not os.path.exists(HAAR_PATH):
-    st.error("Missing haarcascade XML file. Please include haarcascade_frontalface_default.xml.")
-    st.stop()
+face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True)
 
-face_cascade = cv2.CascadeClassifier(HAAR_PATH)
+def rotate_to_horizontal(img, landmarks, width, height):
+    try:
+        left_eye = landmarks[33]  # Approx. left eye
+        right_eye = landmarks[263]  # Approx. right eye
+
+        x1, y1 = int(left_eye.x * width), int(left_eye.y * height)
+        x2, y2 = int(right_eye.x * width), int(right_eye.y * height)
+        dx, dy = x2 - x1, y2 - y1
+        angle = np.degrees(np.arctan2(dy, dx))
+
+        center = (width // 2, height // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        return rotated
+    except:
+        return img
 
 def detect_and_crop_face(pil_img):
     try:
-        cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGBA2BGR)
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3)
-        if len(faces) == 0:
-            return pil_img  # fallback: return original
+        img_rgba = np.array(pil_img)
+        h, w = img_rgba.shape[:2]
+        img_rgb = cv2.cvtColor(img_rgba, cv2.COLOR_RGBA2RGB)
 
-        x, y, w, h = sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]
-        buffer = int(0.6 * h)
+        # Align face using mediapipe
+        results = mp_face_mesh.process(img_rgb)
+        if results.multi_face_landmarks:
+            rotated = rotate_to_horizontal(img_rgb, results.multi_face_landmarks[0].landmark, w, h)
+            img_gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY)
+        else:
+            rotated = img_rgb
+            img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+
+        faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=3)
+        if len(faces) == 0:
+            return pil_img  # fallback
+
+        x, y, fw, fh = sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]
+        buffer = int(0.6 * fh)
         left = max(0, x - buffer)
         top = max(0, y - buffer)
-        right = min(pil_img.width, x + w + buffer)
-        bottom = min(pil_img.height, y + h + buffer)
-        return pil_img.crop((left, top, right, bottom))
+        right = min(rotated.shape[1], x + fw + buffer)
+        bottom = min(rotated.shape[0], y + fh + buffer)
+
+        cropped = rotated[top:bottom, left:right]
+        return Image.fromarray(cropped).convert("RGBA")
     except Exception as e:
-        st.error(f"Face detection failed: {e}")
+        st.error(f"Face crop error: {e}")
         return pil_img
 
-def export_image(pil_img, size_str):
-    w, h = map(int, size_str.split("x"))
-    return pil_img.resize((w, h), Image.Resampling.LANCZOS)
+def place_on_canvas(cropped_img, size_str):
+    try:
+        target_w, target_h = map(int, size_str.split("x"))
+        canvas = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+        aspect_ratio = cropped_img.width / cropped_img.height
+        if target_w / target_h > aspect_ratio:
+            # Fit height
+            new_h = target_h
+            new_w = int(aspect_ratio * new_h)
+        else:
+            new_w = target_w
+            new_h = int(new_w / aspect_ratio)
+        resized = cropped_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        x = (target_w - new_w) // 2
+        y = (target_h - new_h) // 2
+        canvas.paste(resized, (x, y), resized)
+        return canvas
+    except Exception as e:
+        st.error(f"Canvas error: {e}")
+        return cropped_img
 
 def add_to_zip(zip_buffer, filename, image):
     img_bytes = io.BytesIO()
@@ -70,14 +110,14 @@ def process_images(files, sizes, label):
                 cropped = detect_and_crop_face(img)
 
                 for size in sizes:
-                    export = export_image(cropped, size)
+                    export = place_on_canvas(cropped, size)
                     filename = f"{name}-{label}_{size}.png"
                     if name not in generated_images:
                         generated_images[name] = []
                     generated_images[name].append((filename, export))
                     add_to_zip(zipf, filename, export)
             except Exception as e:
-                st.error(f"Failed to process {file.name}: {e}")
+                st.error(f"Error with {file.name}: {e}")
     return zip_buffer
 
 if avatar_files and st.button("🎨 Generate Avatars"):
