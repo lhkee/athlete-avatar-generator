@@ -5,7 +5,6 @@ import streamlit as st
 import numpy as np
 from PIL import Image
 import cv2
-import mediapipe as mp
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
 st.title("🏋️ Athlete Image Generator")
@@ -22,24 +21,7 @@ selected_hero_sizes = st.multiselect("Hero Export Sizes", hero_sizes, default=he
 generated_images = {}
 
 face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
-mp_face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True)
 
-def rotate_to_horizontal(img, landmarks, width, height):
-    try:
-        left_eye = landmarks[33]  # Approx. left eye
-        right_eye = landmarks[263]  # Approx. right eye
-
-        x1, y1 = int(left_eye.x * width), int(left_eye.y * height)
-        x2, y2 = int(right_eye.x * width), int(right_eye.y * height)
-        dx, dy = x2 - x1, y2 - y1
-        angle = np.degrees(np.arctan2(dy, dx))
-
-        center = (width // 2, height // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(img, M, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        return rotated
-    except:
-        return img
 
 def detect_and_crop_face(pil_img):
     try:
@@ -47,14 +29,8 @@ def detect_and_crop_face(pil_img):
         h, w = img_rgba.shape[:2]
         img_rgb = cv2.cvtColor(img_rgba, cv2.COLOR_RGBA2RGB)
 
-        # Align face using mediapipe
-        results = mp_face_mesh.process(img_rgb)
-        if results.multi_face_landmarks:
-            rotated = rotate_to_horizontal(img_rgb, results.multi_face_landmarks[0].landmark, w, h)
-            img_gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY)
-        else:
-            rotated = img_rgb
-            img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        rotated = img_rgb
+        img_gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY)
 
         faces = face_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=3)
         if len(faces) == 0:
