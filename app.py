@@ -1,54 +1,91 @@
 import os
-import streamlit as st
-import cv2
-import numpy as np
-from PIL import Image
 import io
+import zipfile
+import streamlit as st
+import numpy as np
+from PIL import Image, ImageDraw
+import cv2
 
 st.set_page_config(page_title="Athlete Image Generator", layout="centered")
 
 st.title("🏋️ Athlete Image Generator")
 st.markdown("Upload front (avatar) or side (hero) profile images below. The app will export transparent PNGs in selected sizes.")
 
-avatar_images = st.file_uploader("📤 Upload Front Profile Image(s) for Avatar", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True)
-hero_images = st.file_uploader("📤 Upload Side Profile Image(s) for Hero", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True)
+# Upload images
+avatar_files = st.file_uploader("📤 Upload Front Profile Images", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True, key="front")
+hero_files = st.file_uploader("📤 Upload Side Profile Images", type=["png", "jpg", "jpeg", "tif", "tiff"], accept_multiple_files=True, key="side")
 
-if avatar_images:
-    st.success(f"✅ {len(avatar_images)} avatar image(s) uploaded.")
-if hero_images:
-    st.success(f"✅ {len(hero_images)} hero image(s) uploaded.")
+avatar_sizes = ["256x256", "500x345"]
+hero_sizes = ["1200x1165", "1500x920"]
 
-st.markdown("### 🛠 Export Sizes (Default checked)")
-avatar_sizes = st.multiselect("Avatar Sizes", options=["256x256", "500x345"], default=["256x256", "500x345"])
-hero_sizes = st.multiselect("Hero Sizes", options=["1200x1165", "1500x920"], default=["1200x1165", "1500x920"])
+selected_avatar_sizes = st.multiselect("Avatar Export Sizes", avatar_sizes, default=avatar_sizes)
+selected_hero_sizes = st.multiselect("Hero Export Sizes", hero_sizes, default=hero_sizes)
 
-def resize_and_export(image, size_str):
+generated_images = {}
+
+# Load Haar cascade for face detection
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+def detect_and_crop_face(pil_img):
+    cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGBA2BGR)
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3)
+
+    if len(faces) == 0:
+        return pil_img  # fallback: return original
+
+    # Use largest detected face
+    x, y, w, h = sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]
+    buffer = int(0.6 * h)
+    left = max(0, x - buffer)
+    top = max(0, y - buffer)
+    right = min(pil_img.width, x + w + buffer)
+    bottom = min(pil_img.height, y + h + buffer)
+    return pil_img.crop((left, top, right, bottom))
+
+def export_image(pil_img, size_str):
     w, h = map(int, size_str.split("x"))
-    resized = image.resize((w, h), Image.Resampling.LANCZOS)
-    output = io.BytesIO()
-    resized.save(output, format="PNG", optimize=True)
-    return output.getvalue()
+    result = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    img_resized = pil_img.resize((w, h), Image.Resampling.LANCZOS)
+    return img_resized
 
-def process_images(images, sizes, label):
-    for img_file in images:
-        try:
-            base = img_file.name.rsplit(".", 1)[0]
+def add_to_zip(zip_buffer, filename, image):
+    img_bytes = io.BytesIO()
+    image.save(img_bytes, format="PNG", optimize=True)
+    zip_buffer.writestr(filename, img_bytes.getvalue())
+
+def process_images(files, sizes, label):
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zipf:
+        for file in files:
+            base = file.name.rsplit(".", 1)[0]
             name = base.split("-")[0]
-            pil_image = Image.open(img_file).convert("RGBA")
+            img = Image.open(file).convert("RGBA")
+            face_cropped = detect_and_crop_face(img)
+
             for size in sizes:
-                result = resize_and_export(pil_image, size)
+                export = export_image(face_cropped, size)
                 filename = f"{name}-{label}_{size}.png"
-                st.download_button(f"⬇️ Download {filename}", data=result, file_name=filename, mime="image/png")
-                st.success(f"✅ Generated {filename}")
-        except Exception as e:
-            st.error(f"❌ Error processing {img_file.name}: {str(e)}")
+                if name not in generated_images:
+                    generated_images[name] = []
+                generated_images[name].append((filename, export))
+                add_to_zip(zipf, filename, export)
+    return zip_buffer
 
-if avatar_images and avatar_sizes:
-    if st.button("🎨 Generate Avatars"):
-        st.markdown("### 🖼 Avatar Exports")
-        process_images(avatar_images, avatar_sizes, "avatar")
+if avatar_files and st.button("🎨 Generate Avatars"):
+    zip_data = process_images(avatar_files, selected_avatar_sizes, "avatar")
+    st.download_button("⬇️ Download All Avatars", data=zip_data.getvalue(), file_name="avatars.zip", mime="application/zip")
 
-if hero_images and hero_sizes:
-    if st.button("🎨 Generate Hero Images"):
-        st.markdown("### 🖼 Hero Exports")
-        process_images(hero_images, hero_sizes, "hero")
+if hero_files and st.button("🎨 Generate Hero Images"):
+    zip_data = process_images(hero_files, selected_hero_sizes, "hero")
+    st.download_button("⬇️ Download All Hero Images", data=zip_data.getvalue(), file_name="heroes.zip", mime="application/zip")
+
+if generated_images:
+    st.markdown("### 🖼 Download Individual Files")
+    for name, items in generated_images.items():
+        st.subheader(name)
+        for fname, img in items:
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format="PNG", optimize=True)
+            st.image(img, caption=fname, width=200)
+            st.download_button(f"⬇️ Download {fname}", data=img_bytes.getvalue(), file_name=fname, mime="image/png")
