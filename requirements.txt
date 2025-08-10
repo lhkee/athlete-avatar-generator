@@ -1,5 +1,5 @@
 streamlit
-numpy
-Pillow
-tifffile
 opencv-python-headless
+Pillow
+numpy
+tifffile
