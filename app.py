@@ -7,14 +7,15 @@ import io, os, zipfile
 st.set_page_config(page_title="Athlete Avatar & Hero Generator", layout="centered")
 
 st.title("🏋️ Athlete Avatar & Hero Generator")
-st.caption("Drop front (avatars) and side (heroes) images. Free-tier friendly. Pillow-first TIFF decode (LZW) — no imagecodecs needed.")
+st.caption("Upload front (avatars) and side (heroes) images. Pillow-first TIFF decode (LZW), free-tier friendly.")
 
 # ───────────────────────── Controls
 colA, colB = st.columns([1,1])
 with colA:
     debug = st.toggle("Debug Mode", value=False, help="Show detailed processing logs in the UI.")
 with colB:
-    auto_straighten = st.toggle("Auto-straighten (eyes)", value=True, help="Deskew tilted faces via eye detection (Haar).")
+    auto_straighten = st.toggle("Auto-straighten (eyes)", value=True,
+                                help="Deskew tilted faces via Haar eye detection.")
 
 # Uploaders
 front_files = st.file_uploader(
@@ -58,7 +59,7 @@ def _load_image(upload):
         upload.seek(0)
         bio = io.BytesIO(raw)
 
-        # Pillow-first (LZW supported)
+        # Pillow-first (supports LZW)
         try:
             img = Image.open(bio)
             img.load()  # force decode
@@ -98,12 +99,18 @@ def _detect_faces_cv2(pil_img):
             gray, scaleFactor=1.1, minNeighbors=4,
             flags=cv2.CASCADE_SCALE_IMAGE, minSize=(60,60)
         )
-        if len(faces) == 0:
-            faces = PROFILE.detectMultiScale(
+
+        # Convert to list of tuples if any
+        faces_list = [tuple(map(int, b)) for b in faces] if len(faces) else []
+
+        if len(faces_list) == 0:
+            faces_p = PROFILE.detectMultiScale(
                 gray, scaleFactor=1.1, minNeighbors=3,
                 flags=cv2.CASCADE_SCALE_IMAGE, minSize=(60,60)
             )
-        if len(faces) == 0:
+            faces_list = [tuple(map(int, b)) for b in faces_p] if len(faces_p) else []
+
+        if len(faces_list) == 0:
             # try mirrored (detect right profile by flipping)
             gray_flipped = cv2.flip(gray, 1)
             faces_flip = PROFILE.detectMultiScale(
@@ -115,9 +122,9 @@ def _detect_faces_cv2(pil_img):
                 mapped = []
                 for (x,y,wf,hf) in faces_flip:
                     mapped.append((w - (x+wf), y, wf, hf))
-                faces = np.array(mapped, dtype=np.int32)
+                faces_list = mapped
 
-        return faces if len(faces) else []
+        return faces_list  # always a Python list
     except Exception as e:
         st.error(f"❌ Face detection error: {e}")
         return []
@@ -139,7 +146,7 @@ def _estimate_roll_from_eyes(pil_img):
             p2 = np.array([x2 + w2/2.0, y2 + h2/2.0])
             dy = p2[1] - p1[1]
             dx = p2[0] - p1[0]
-            if dx == 0: 
+            if dx == 0:
                 return 0.0
             angle = np.degrees(np.arctan2(dy, dx))
             return angle
@@ -217,7 +224,7 @@ def _process_files(files, sizes, label):
 
             faces = _detect_faces_cv2(img)
             if debug: st.write(f"🔍 Faces detected: {len(faces)}")
-            if not faces:
+            if faces is None or len(faces) == 0:
                 st.warning(f"⚠️ No face detected in {up.name}. Export skipped.")
                 continue
 
