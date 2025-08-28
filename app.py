@@ -1,9 +1,9 @@
-
 import streamlit as st
 import numpy as np
 import cv2
 from PIL import Image
 import io, os, zipfile
+import sys, platform
 
 # ───────────────────────── Mediapipe (graceful import for Py3.11 env)
 try:
@@ -16,7 +16,24 @@ except Exception:
 st.set_page_config(page_title="Athlete Avatar & Hero Generator", layout="centered")
 
 st.title("🏋️ Athlete Avatar & Hero Generator")
-st.caption("Per-image landmark crop • Pillow-first TIFF (LZW) • Streamlit Free compatible (Python 3.11).")
+st.caption("Landmark crop + improved hairstyle detection • Pillow-first TIFF (LZW) • Streamlit Free compatible (Python 3.11).")
+
+# Small env pane to confirm versions at runtime (helps debugging deployments)
+def _env_panel():
+    try:
+        import mediapipe as _mp
+        mp_ver = _mp.__version__
+    except Exception:
+        mp_ver = "NOT INSTALLED"
+    st.sidebar.markdown("### Environment")
+    st.sidebar.code(
+        f"Python:   {sys.version.split()[0]}\n"
+        f"Streamlit:{st.__version__}\n"
+        f"NumPy:    {np.__version__}\n"
+        f"OpenCV:   {cv2.__version__}\n"
+        f"Mediapipe:{mp_ver}"
+    )
+_env_panel()
 
 # ───────────────────────── Controls
 colA, colB = st.columns([1,1])
@@ -142,20 +159,40 @@ if MP_OK:
         eye_x = float(np.mean([landmarks[i,0] for i in LM_EYES]))
         return eye_y, chin_y, forehead_y, eye_x
 
-    def _scan_top_of_hair(pil_img, forehead_y, x_center, max_scan_px=0.22):
+    # ── IMPROVED: wide-band scan for hairstyle top ────────────────────────────
+    def _scan_top_of_hair(pil_img, forehead_y, x_center, face_w, max_scan_frac=0.35):
+        """
+        Scan a wide band (±30% face width) above the forehead up to 35% of image height
+        to detect the strongest hair boundary. Adds adaptive margin for tall/voluminous hair.
+        """
         gray = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
         H, W = gray.shape
-        col = int(np.clip(x_center, 0, W-1))
-        start = int(max(forehead_y - int(max_scan_px*H), 0))
+
+        band_half = int(0.30 * max(face_w, 1))
+        x0, x1 = max(0, int(x_center - band_half)), min(W-1, int(x_center + band_half))
+
+        start = int(max(forehead_y - max_scan_frac*H, 0))
         stop  = int(max(forehead_y - 2, 0))
-        win = gray[:, max(0,col-4):min(W,col+5)]
-        grad = cv2.Sobel(win, cv2.CV_32F, 0, 1, ksize=3)
-        gline = np.mean(np.abs(grad), axis=1)
+
+        win = gray[:, x0:x1]
+        grad = cv2.Sobel(win, cv2.CV_32F, 0, 1, ksize=3)           # vertical gradient
+        gline = np.mean(np.abs(grad), axis=1)                      # average across band
         seg = gline[start:stop] if stop>start else gline[:1]
+
         if seg.size > 0:
             idx = int(np.argmax(seg))
-            return float(start + idx)
-        return max(forehead_y - 0.06*H, 0.0)
+            top_y = start + idx
+        else:
+            top_y = max(forehead_y - 0.08*H, 0)                    # conservative fallback
+
+        # If span is large or texture is strong above forehead, extend margin to avoid cropping hair
+        span = (forehead_y - top_y) / max(H,1)
+        band = gray[max(0,int(top_y)):int(forehead_y), x0:x1]
+        texture = float(np.var(band)) if band.size else 0.0
+        if span > 0.18 or texture > 250.0:                         # tall/curly hair
+            top_y = max(top_y - 0.04*H, 0)                         # push crop up a bit more
+
+        return float(top_y)
 
     def _face_shape_adjustments(eye_y, chin_y, forehead_y):
         face_h = max(chin_y - eye_y, 1.0)
@@ -170,19 +207,6 @@ if MP_OK:
             adj["scale_bias"] = 1.035
             adj["shift_bias"] = +0.012
         return adj
-
-    def _hair_type(pil_img, forehead_y, top_y, x_center):
-        gray = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
-        H, W = gray.shape
-        col0, col1 = int(max(0,x_center-20)), int(min(W-1,x_center+20))
-        y0, y1 = int(max(0, top_y)), int(min(H-1, forehead_y))
-        if y1 <= y0: return "normal"
-        patch = gray[y0:y1, col0:col1]
-        var = float(np.var(patch))
-        span = (forehead_y - top_y) / max(H,1)
-        if var < 80:     return "bald"
-        if span > 0.14:  return "tall"
-        return "normal"
 
     def _deskew_by_eyes(pil_img, landmarks):
         pL = landmarks[33]; pR = landmarks[263]
@@ -201,7 +225,8 @@ if MP_OK:
         W_img, H_img = pil_img.size
 
         eye_y, chin_y, forehead_y, eye_x = _eye_chin_forehead_y(landmarks)
-        top_y = _scan_top_of_hair(pil_img, forehead_y, x_center=cx)
+        # improved hair scan uses face width
+        top_y = _scan_top_of_hair(pil_img, forehead_y, x_center=cx, face_w=w)
 
         adj = _face_shape_adjustments(eye_y, chin_y, forehead_y)
         tgt = TARGETS[kind][target_label].copy()
@@ -214,8 +239,8 @@ if MP_OK:
         crop_top = eye_y - tgt["eye"] * crop_h
         crop_top += adj["shift_bias"] * th  # interpret as fraction of output height
 
-        # ensure hair not cropped
-        margin = 0.012 * th
+        # ensure hair not cropped (adaptive margin)
+        margin = 0.014 * th
         if (top_y - crop_top) < margin:
             crop_top = max(0.0, top_y - margin)
 
@@ -242,13 +267,13 @@ if MP_OK:
         B = int(min(H_img, round(crop_bottom)))
         if R <= L+10 or B <= T+10:
             # simple fallback: pad around face box by aspect
-            ar = tw/float(th)
-            x0,y0,fw,fh = face_box
-            ch = int(max(fh*1.6, 60))
-            cw = int(ch*ar)
+            ar2 = tw/float(th)
+            x0,y0,fw,fh = (x,y,w,h)
+            ch2 = int(max(fh*1.6, 60))
+            cw2 = int(ch2*ar2)
             cx0 = x0 + fw/2; cy0 = y0 + fh/2
-            L = int(max(0, cx0 - cw/2)); T = int(max(0, cy0 - ch/2))
-            R = int(min(W_img, L+cw));    B = int(min(H_img, T+ch))
+            L = int(max(0, cx0 - cw2/2)); T = int(max(0, cy0 - ch2/2))
+            R = int(min(W_img, L+cw2));    B = int(min(H_img, T+ch2))
 
         return pil_img.crop((L,T,R,B))
 
@@ -316,7 +341,6 @@ def _process(files, sizes, label):
             # Deskew if possible
             if auto_straighten and lms is not None:
                 img = _deskew_by_eyes(img, lms)
-                # recompute landmarks after rotation
                 try:
                     lms = _mediapipe_landmarks(img)
                 except Exception:
@@ -335,7 +359,6 @@ def _process(files, sizes, label):
                 out = crop.resize((w,h), Image.LANCZOS)
 
                 if debug:
-                    # draw targets when landmarks used
                     pr = np.array(out)
                     tgt = TARGETS.get(kind, {}).get(s, None)
                     if tgt is not None:
