@@ -4,12 +4,19 @@ import numpy as np
 import cv2
 from PIL import Image
 import io, os, zipfile
-import mediapipe as mp
+
+# ───────────────────────── Mediapipe (graceful import for Py3.11 env)
+try:
+    import mediapipe as mp
+    MP_OK = True
+except Exception:
+    MP_OK = False
+    mp = None
 
 st.set_page_config(page_title="Athlete Avatar & Hero Generator", layout="centered")
 
 st.title("🏋️ Athlete Avatar & Hero Generator")
-st.caption("Per-image landmark crop • Pillow-first TIFF (LZW) • Streamlit Free compatible")
+st.caption("Per-image landmark crop • Pillow-first TIFF (LZW) • Streamlit Free compatible (Python 3.11).")
 
 # ───────────────────────── Controls
 colA, colB = st.columns([1,1])
@@ -17,7 +24,7 @@ with colA:
     debug = st.toggle("Debug Mode", value=False, help="Show detailed processing logs in the UI.")
 with colB:
     auto_straighten = st.toggle("Auto-straighten (eyes)", value=True,
-                                help="Deskew tilted faces via landmark eye line.")
+                                help="Deskew tilted faces via landmark eye line (uses Mediapipe when available).")
 
 # Uploaders
 front_files = st.file_uploader(
@@ -37,7 +44,7 @@ with c1:
 with c2:
     hero_opts   = st.multiselect("Hero",   ["1200x1165","1500x920"], default=["1200x1165","1500x920"])
 
-# ───────────────────────── Targets (fractions of output height)
+# Target line fractions (y / output_height)
 TARGETS = {
     "avatar": {
         "256x256":  {"eye": 0.44, "chin": 0.832},
@@ -48,12 +55,6 @@ TARGETS = {
         "1500x920":  {"eye": 0.35, "chin": 0.417},
     },
 }
-
-# ───────────────────────── MediaPipe Face Mesh (landmarks)
-mp_face = mp.solutions.face_mesh
-LM_CHIN = 152
-LM_FOREHEAD = 10
-LM_EYES = [33, 133, 362, 263, 159, 386]  # corners + upper lids
 
 def _log(msg: str):
     if debug: st.write(msg)
@@ -93,142 +94,7 @@ def _load_image(upload):
         st.error(f"❌ Failed to load {upload.name}: {e}")
         return None
 
-# ───────────────────────── Landmarks & helpers
-def _mediapipe_landmarks(pil_img):
-    img = np.array(pil_img.convert("RGB"))
-    with mp_face.FaceMesh(static_image_mode=True, refine_landmarks=True,
-                          max_num_faces=1, min_detection_confidence=0.5) as fm:
-        res = fm.process(img)
-        if not res.multi_face_landmarks:
-            return None
-        lm = res.multi_face_landmarks[0].landmark
-        H, W = img.shape[0], img.shape[1]
-        pts = np.array([[lm_i.x * W, lm_i.y * H] for lm_i in lm], dtype=np.float32)
-        return pts
-
-def _eye_chin_forehead_y(landmarks):
-    eye_y = float(np.mean([landmarks[i,1] for i in LM_EYES]))
-    chin_y = float(landmarks[LM_CHIN,1])
-    forehead_y = float(landmarks[LM_FOREHEAD,1])
-    eye_x = float(np.mean([landmarks[i,0] for i in LM_EYES]))
-    return eye_y, chin_y, forehead_y, eye_x
-
-def _scan_top_of_hair(pil_img, forehead_y, x_center, max_scan_px=0.22):
-    gray = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
-    H, W = gray.shape
-    col = int(np.clip(x_center, 0, W-1))
-    start = int(max(forehead_y - int(max_scan_px*H), 0))
-    stop  = int(max(forehead_y - 2, 0))
-    win = gray[:, max(0,col-4):min(W,col+5)]
-    grad = cv2.Sobel(win, cv2.CV_32F, 0, 1, ksize=3)
-    gline = np.mean(np.abs(grad), axis=1)
-    seg = gline[start:stop] if stop>start else gline[:1]
-    if seg.size > 0:
-        idx = int(np.argmax(seg))
-        return float(start + idx)
-    return max(forehead_y - 0.06*H, 0.0)
-
-def _face_shape_adjustments(eye_y, chin_y, forehead_y):
-    face_h = max(chin_y - eye_y, 1.0)
-    upper_h = max(eye_y - forehead_y, 1.0)
-    ratio = face_h / upper_h
-
-    adj = dict(eye_bias=0.0, scale_bias=1.0, shift_bias=0.0)
-
-    # Wider faces → eyes slightly above target, shift up a bit
-    if ratio < 1.5:
-        adj["eye_bias"] = -0.012
-        adj["shift_bias"] = -0.015
-
-    # Longer faces → enlarge slightly, shift down, eyes below target
-    elif ratio > 2.2:
-        adj["eye_bias"] = +0.015
-        adj["scale_bias"] = 1.035
-        adj["shift_bias"] = +0.012
-
-    return adj
-
-def _hair_type(pil_img, forehead_y, top_y, x_center):
-    gray = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
-    H, W = gray.shape
-    col0, col1 = int(max(0,x_center-20)), int(min(W-1,x_center+20))
-    y0, y1 = int(max(0, top_y)), int(min(H-1, forehead_y))
-    if y1 <= y0: return "normal"
-    patch = gray[y0:y1, col0:col1]
-    var = float(np.var(patch))
-    span = (forehead_y - top_y) / max(H,1)
-    if var < 80:     return "bald"
-    if span > 0.14:  return "tall"
-    return "normal"
-
-def _deskew_by_eyes(pil_img, landmarks):
-    # angle from two outer eye corners (approx: 33 and 263)
-    pL = landmarks[33]; pR = landmarks[263]
-    dy, dx = (pR[1]-pL[1]), (pR[0]-pL[0])
-    if abs(dx) < 1e-3: return pil_img
-    ang = np.degrees(np.arctan2(dy, dx))
-    if abs(ang) < 1.5: return pil_img
-    if debug: st.write(f"↩️ Auto-straighten: rotating {-ang:.2f}°")
-    return pil_img.rotate(-ang, resample=Image.BICUBIC, expand=True)
-
-# ───────────────────────── Crop from landmarks
-def _crop_from_landmarks(pil_img, face_box, landmarks, target_label, kind):
-    tw, th = map(int, target_label.split("x"))
-    ar = tw / float(th)
-    (x,y,w,h) = face_box
-    cx = x + w/2.0
-    W_img, H_img = pil_img.size
-
-    eye_y, chin_y, forehead_y, eye_x = _eye_chin_forehead_y(landmarks)
-    top_y = _scan_top_of_hair(pil_img, forehead_y, x_center=cx)
-
-    adj = _face_shape_adjustments(eye_y, chin_y, forehead_y)
-    tgt = TARGETS[kind][target_label].copy()
-    tgt["eye"] = np.clip(tgt["eye"] + adj["eye_bias"], 0.05, 0.95)
-
-    # vertical scale from eye-chin spacing
-    crop_h = (chin_y - eye_y) / max((tgt["chin"] - tgt["eye"]), 1e-6)
-    crop_h *= adj["scale_bias"]
-
-    crop_top = eye_y - tgt["eye"] * crop_h
-    crop_top += adj["shift_bias"] * th
-
-    # respect top-of-hair (with small margin)
-    margin = 0.012 * th
-    if (top_y - crop_top) < margin:
-        crop_top = max(0.0, top_y - margin)
-
-    crop_bottom = crop_top + crop_h
-    crop_w = crop_h * ar
-    crop_left = cx - crop_w/2.0
-    crop_right = crop_left + crop_w
-
-    # clamp
-    if crop_left < 0:
-        crop_right -= crop_left; crop_left = 0
-    if crop_top < 0:
-        crop_bottom -= crop_top; crop_top = 0
-    if crop_right > W_img:
-        shift = crop_right - W_img
-        crop_left -= shift; crop_right = W_img
-    if crop_bottom > H_img:
-        shift = crop_bottom - H_img
-        crop_top -= shift; crop_bottom = H_img
-
-    L = int(max(0, round(crop_left)))
-    T = int(max(0, round(crop_top)))
-    R = int(min(W_img, round(crop_right)))
-    B = int(min(H_img, round(crop_bottom)))
-    if R <= L+10 or B <= T+10:
-        # Fallback: center on face box
-        return pil_img.crop((max(0,x- int(0.2*w)),
-                             max(0,y- int(0.2*h)),
-                             min(W_img, x+ int(1.2*w)),
-                             min(H_img, y+ int(1.2*h))))
-
-    return pil_img.crop((L,T,R,B))
-
-# ───────────────────────── Haar fallback (for face box) 
+# ───────────────────────── Haar fallback (face box)
 FRONTAL = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 PROFILE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml")
 
@@ -250,6 +116,171 @@ def _detect_face_box(pil_img):
     x,y,w,h = [int(v) for v in faces_sorted[0]]
     return (x,y,w,h)
 
+# ───────────────────────── Landmark helpers (only if Mediapipe is available)
+if MP_OK:
+    mp_face = mp.solutions.face_mesh
+    LM_CHIN = 152
+    LM_FOREHEAD = 10
+    LM_EYES = [33, 133, 362, 263, 159, 386]  # corners + upper lids
+
+    def _mediapipe_landmarks(pil_img):
+        img = np.array(pil_img.convert("RGB"))
+        with mp_face.FaceMesh(static_image_mode=True, refine_landmarks=True,
+                              max_num_faces=1, min_detection_confidence=0.5) as fm:
+            res = fm.process(img)
+            if not res.multi_face_landmarks:
+                return None
+            lm = res.multi_face_landmarks[0].landmark
+            H, W = img.shape[0], img.shape[1]
+            pts = np.array([[lm_i.x * W, lm_i.y * H] for lm_i in lm], dtype=np.float32)
+            return pts
+
+    def _eye_chin_forehead_y(landmarks):
+        eye_y = float(np.mean([landmarks[i,1] for i in LM_EYES]))
+        chin_y = float(landmarks[LM_CHIN,1])
+        forehead_y = float(landmarks[LM_FOREHEAD,1])
+        eye_x = float(np.mean([landmarks[i,0] for i in LM_EYES]))
+        return eye_y, chin_y, forehead_y, eye_x
+
+    def _scan_top_of_hair(pil_img, forehead_y, x_center, max_scan_px=0.22):
+        gray = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        H, W = gray.shape
+        col = int(np.clip(x_center, 0, W-1))
+        start = int(max(forehead_y - int(max_scan_px*H), 0))
+        stop  = int(max(forehead_y - 2, 0))
+        win = gray[:, max(0,col-4):min(W,col+5)]
+        grad = cv2.Sobel(win, cv2.CV_32F, 0, 1, ksize=3)
+        gline = np.mean(np.abs(grad), axis=1)
+        seg = gline[start:stop] if stop>start else gline[:1]
+        if seg.size > 0:
+            idx = int(np.argmax(seg))
+            return float(start + idx)
+        return max(forehead_y - 0.06*H, 0.0)
+
+    def _face_shape_adjustments(eye_y, chin_y, forehead_y):
+        face_h = max(chin_y - eye_y, 1.0)
+        upper_h = max(eye_y - forehead_y, 1.0)
+        ratio = face_h / upper_h
+        adj = dict(eye_bias=0.0, scale_bias=1.0, shift_bias=0.0)
+        if ratio < 1.5:      # wider
+            adj["eye_bias"] = -0.012
+            adj["shift_bias"] = -0.015
+        elif ratio > 2.2:    # longer
+            adj["eye_bias"] = +0.015
+            adj["scale_bias"] = 1.035
+            adj["shift_bias"] = +0.012
+        return adj
+
+    def _hair_type(pil_img, forehead_y, top_y, x_center):
+        gray = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        H, W = gray.shape
+        col0, col1 = int(max(0,x_center-20)), int(min(W-1,x_center+20))
+        y0, y1 = int(max(0, top_y)), int(min(H-1, forehead_y))
+        if y1 <= y0: return "normal"
+        patch = gray[y0:y1, col0:col1]
+        var = float(np.var(patch))
+        span = (forehead_y - top_y) / max(H,1)
+        if var < 80:     return "bald"
+        if span > 0.14:  return "tall"
+        return "normal"
+
+    def _deskew_by_eyes(pil_img, landmarks):
+        pL = landmarks[33]; pR = landmarks[263]
+        dy, dx = (pR[1]-pL[1]), (pR[0]-pL[0])
+        if abs(dx) < 1e-3: return pil_img
+        ang = np.degrees(np.arctan2(dy, dx))
+        if abs(ang) < 1.5: return pil_img
+        if debug: st.write(f"↩️ Auto-straighten: rotating {-ang:.2f}°")
+        return pil_img.rotate(-ang, resample=Image.BICUBIC, expand=True)
+
+    def _crop_from_landmarks(pil_img, face_box, landmarks, target_label, kind):
+        tw, th = map(int, target_label.split("x"))
+        ar = tw / float(th)
+        (x,y,w,h) = face_box
+        cx = x + w/2.0
+        W_img, H_img = pil_img.size
+
+        eye_y, chin_y, forehead_y, eye_x = _eye_chin_forehead_y(landmarks)
+        top_y = _scan_top_of_hair(pil_img, forehead_y, x_center=cx)
+
+        adj = _face_shape_adjustments(eye_y, chin_y, forehead_y)
+        tgt = TARGETS[kind][target_label].copy()
+        tgt["eye"] = np.clip(tgt["eye"] + adj["eye_bias"], 0.05, 0.95)
+
+        # scale from eye-chin spacing
+        crop_h = (chin_y - eye_y) / max((tgt["chin"] - tgt["eye"]), 1e-6)
+        crop_h *= adj["scale_bias"]
+
+        crop_top = eye_y - tgt["eye"] * crop_h
+        crop_top += adj["shift_bias"] * th  # interpret as fraction of output height
+
+        # ensure hair not cropped
+        margin = 0.012 * th
+        if (top_y - crop_top) < margin:
+            crop_top = max(0.0, top_y - margin)
+
+        crop_bottom = crop_top + crop_h
+        crop_w = crop_h * ar
+        crop_left = cx - crop_w/2.0
+        crop_right = crop_left + crop_w
+
+        # clamp
+        if crop_left < 0:
+            crop_right -= crop_left; crop_left = 0
+        if crop_top < 0:
+            crop_bottom -= crop_top; crop_top = 0
+        if crop_right > W_img:
+            shift = crop_right - W_img
+            crop_left -= shift; crop_right = W_img
+        if crop_bottom > H_img:
+            shift = crop_bottom - H_img
+            crop_top -= shift; crop_bottom = H_img
+
+        L = int(max(0, round(crop_left)))
+        T = int(max(0, round(crop_top)))
+        R = int(min(W_img, round(crop_right)))
+        B = int(min(H_img, round(crop_bottom)))
+        if R <= L+10 or B <= T+10:
+            # simple fallback: pad around face box by aspect
+            ar = tw/float(th)
+            x0,y0,fw,fh = face_box
+            ch = int(max(fh*1.6, 60))
+            cw = int(ch*ar)
+            cx0 = x0 + fw/2; cy0 = y0 + fh/2
+            L = int(max(0, cx0 - cw/2)); T = int(max(0, cy0 - ch/2))
+            R = int(min(W_img, L+cw));    B = int(min(H_img, T+ch))
+
+        return pil_img.crop((L,T,R,B))
+
+# ───────────────────────── Simple face-centered crop (used as fallback)
+def _face_center_crop(pil_img, face_box, target_wh, kind):
+    tw, th = target_wh
+    ar = tw / float(th)
+    (x,y,w,h) = face_box
+    cx, cy = x + w/2.0, y + h/2.0
+    face_frac = 0.60 if kind=="avatar" else 0.52
+    crop_h = max(int(h / face_frac), 60)
+    crop_w = int(crop_h * ar)
+
+    left = int(cx - crop_w/2.0)
+    top  = int(cy - crop_h/2.0)
+    right = left + crop_w
+    bottom = top + crop_h
+
+    W, H = pil_img.size
+    if left < 0:
+        right -= left; left = 0
+    if top < 0:
+        bottom -= top; top = 0
+    if right > W:
+        left -= (right - W); right = W
+    if bottom > H:
+        top -= (bottom - H); bottom = H
+
+    left = max(left, 0); top = max(top, 0)
+    right = min(right, W); bottom = min(bottom, H)
+    return pil_img.crop((left, top, right, bottom))
+
 def _clean_base(filename):
     base = os.path.splitext(filename)[0]
     if "-" in base:
@@ -268,50 +299,51 @@ def _process(files, sizes, label):
             img = _load_image(up)
             if img is None: continue
 
-            lms = _mediapipe_landmarks(img)
-            if lms is None:
-                st.warning(f"⚠️ No landmarks found in {up.name}. Trying Haar fallback.")
+            # Haar face box (always)
             face = _detect_face_box(img)
             if face is None:
-                st.warning(f"⚠️ No face detected in {up.name}. Skipped.")
-                continue
+                st.warning(f"⚠️ No face detected in {up.name}. Skipped."); continue
 
-            # Optional deskew
+            # Landmarks (if mediapipe available)
+            lms = None
+            if MP_OK:
+                try:
+                    lms = _mediapipe_landmarks(img)
+                except Exception as e:
+                    lms = None
+                    if debug: st.write(f"⚠️ Mediapipe landmark error: {e}")
+
+            # Deskew if possible
             if auto_straighten and lms is not None:
                 img = _deskew_by_eyes(img, lms)
-                # re-detect landmarks after rotation
-                lms = _mediapipe_landmarks(img)
+                # recompute landmarks after rotation
+                try:
+                    lms = _mediapipe_landmarks(img)
+                except Exception:
+                    lms = None
 
             base = _clean_base(up.name)
 
             for s in sizes:
                 kind = "avatar" if label=="avatar" else "hero"
                 w, h = map(int, s.split("x"))
-                if lms is not None:
+                if lms is not None and MP_OK:
                     crop = _crop_from_landmarks(img, face, lms, s, kind)
                 else:
-                    # last resort: enlarge around face, keep aspect
-                    ar = w/float(h)
-                    x,y,fw,fh = face
-                    ch = int(max(fh*1.6, 60))
-                    cw = int(ch*ar)
-                    cx = x + fw/2
-                    cy = y + fh/2
-                    L = int(max(0, cx - cw/2)); T = int(max(0, cy - ch/2))
-                    R = int(min(img.size[0], L+cw)); B = int(min(img.size[1], T+ch))
-                    crop = img.crop((L,T,R,B))
+                    crop = _face_center_crop(img, face, (w,h), kind)
 
                 out = crop.resize((w,h), Image.LANCZOS)
 
-                # Optional debug overlay of target lines
-                if debug and lms is not None:
+                if debug:
+                    # draw targets when landmarks used
                     pr = np.array(out)
-                    tgt = TARGETS[kind][s]
-                    ey = int(tgt["eye"]  * h)
-                    cy = int(tgt["chin"] * h)
-                    cv2.line(pr, (0, ey), (w-1, ey), (0,0,255), 1)
-                    cv2.line(pr, (0, cy), (w-1, cy), (0,0,255), 1)
-                    st.image(pr, caption=f"Debug preview + targets · {s}", use_column_width=True)
+                    tgt = TARGETS.get(kind, {}).get(s, None)
+                    if tgt is not None:
+                        ey = int(tgt["eye"]  * h)
+                        cy = int(tgt["chin"] * h)
+                        cv2.line(pr, (0, ey), (w-1, ey), (0,0,255), 1)
+                        cv2.line(pr, (0, cy), (w-1, cy), (0,0,255), 1)
+                    st.image(pr, caption=f"Preview ({s})", use_column_width=True)
 
                 buf = io.BytesIO()
                 out.save(buf, format="PNG", optimize=True)
