@@ -2,3 +2,4 @@ streamlit
 opencv-python-headless
 Pillow
 numpy
+mediapipe==0.10.14
