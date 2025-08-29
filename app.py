@@ -254,16 +254,15 @@ def render_croppers(kind: str):
             }
 
         # Show cropper (fixed aspect ratio) — NOTE: image passed as first positional arg
-        aspect = w_out / float(h_out)
-        st.caption("Drag the rectangle to pan; use handles to scale. Live preview matches export.")
-        crop_box = st_cropper(
-            work.convert("RGB"),
-            realtime_update=True,
-            aspect_ratio=aspect,
-            box_color='#FF2B2B',
-            return_type='box',
-            key=f"cropper_{kind}_{pn}_{s}",
-        )
+        aspect = (w_out, h_out)   # must be a 2-element tuple
+st_cropper(
+    work.convert("RGB"),
+    realtime_update=True,
+    aspect_ratio=aspect,
+    box_color='#FF2B2B',
+    return_type='box',
+    key=f"cropper_{kind}_{pn}_{s}",
+)
 
         # If user moved the box, store it (working coords)
         if crop_box and all(k2 in crop_box for k2 in ("left", "top", "width", "height")):
