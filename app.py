@@ -23,11 +23,20 @@ except Exception:
 # ──────────────────────────────────────────────────────────────────────────────
 # Page + compact layout
 st.set_page_config(page_title="Athlete Image Generator", layout="wide")
-st.markdown("<style>div.block-container{padding-top:1rem;padding-bottom:2rem;}</style>", unsafe_allow_html=True)
+st.markdown("""
+<style>
+div.block-container{padding-top:1rem;padding-bottom:2rem;}
+/* tighter sidebar spacing */
+section[data-testid="stSidebar"] .stSlider,
+section[data-testid="stSidebar"] .stMultiSelect,
+section[data-testid="stSidebar"] .stRadio{margin-bottom:.35rem;}
+.stButton>button{height:2.2rem;padding:0 .9rem;}
+</style>
+""", unsafe_allow_html=True)
 st.title("🏋️ Athlete Image Generator — Auto + Manual")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Targets and safety constants
+# Targets and safety constants (fractions of output height)
 TARGETS = {
     "avatar": {"256x256":{"eye":0.44,"chin":0.832}, "500x345":{"eye":0.44,"chin":0.835}},
     "hero":   {"1200x1165":{"eye":0.35,"chin":0.418}, "1500x920":{"eye":0.35,"chin":0.417}},
@@ -37,7 +46,7 @@ BOTTOM_MARGIN={"avatar":0.024,"hero":0.020}
 HAIR_TALL_BONUS={"avatar":0.010,"hero":0.006}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sidebar: compact controls
+# Sidebar controls (compact)
 with st.sidebar:
     st.markdown("### Controls")
     mode = st.radio("Manual Mode", ["Off (Auto only)", "Sliders (batch)", "Drag-to-crop (single)"], index=1)
@@ -58,6 +67,10 @@ with st.sidebar:
         man_eye_bias    = st.slider("Eye target bias (±2.5%)", -25, 25, 0)
         man_hair_margin = st.slider("Hair margin (+px)",         0, 40, 0)
         man_chin_margin = st.slider("Chin margin (+px)",         0, 40, 0)
+        st.caption(
+            f"Active: scale={man_scale:+}%, vshift={man_vshift:+} px, "
+            f"eye_bias={man_eye_bias:+}‰, hair+={man_hair_margin}px, chin+={man_chin_margin}px"
+        )
     else:
         man_scale = man_vshift = man_eye_bias = man_hair_margin = man_chin_margin = 0
 
@@ -77,19 +90,16 @@ with st.sidebar:
     )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Session state: keep uploads & selection persistent between reruns
-for k in ["front_bufs", "side_bufs", "front_names", "side_names", "preview_kind", "preview_name"]:
+# Session state to persist uploads/selection across reruns
+for k in ["front_bufs","side_bufs","front_names","side_names","preview_kind","preview_name"]:
     if k not in st.session_state:
         st.session_state[k] = [] if "bufs" in k or "names" in k else None
 
-def _read_all_bytes(uploaded_file):
-    data = uploaded_file.read()
-    uploaded_file.seek(0)
-    return data
+def _read_all_bytes(up):
+    b = up.read(); up.seek(0); return b
 
 def _buffer_uploads(files, which):
-    if not files:
-        return
+    if not files: return
     bufs, names = [], []
     for f in files:
         try:
@@ -98,50 +108,46 @@ def _buffer_uploads(files, which):
         except Exception as e:
             st.error(f"Failed to read {f.name}: {e}")
     if which=="front":
-        st.session_state.front_bufs = bufs
-        st.session_state.front_names = names
+        st.session_state.front_bufs, st.session_state.front_names = bufs, names
     else:
-        st.session_state.side_bufs = bufs
-        st.session_state.side_names = names
+        st.session_state.side_bufs, st.session_state.side_names   = bufs, names
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Uploaders (top of main; buffered into session_state)
+# Uploaders (tabs) + fixed preview placeholders
 t1, t2 = st.tabs(["Avatars (front)", "Heroes (side)"])
 with t1:
     c1, c2 = st.columns([1,2])
     with c1:
-        front_files = st.file_uploader("Upload front profile images", type=["tif","tiff","png","jpg","jpeg"], accept_multiple_files=True, key="front_upl")
-        if front_files:
-            _buffer_uploads(front_files, "front")
+        ff = st.file_uploader("Upload front profile images", type=["tif","tiff","png","jpg","jpeg"], accept_multiple_files=True, key="front_upl")
+        if ff: _buffer_uploads(ff, "front")
         if st.session_state.front_names:
             st.selectbox("Preview image", st.session_state.front_names, key="preview_name_front")
             st.session_state.preview_kind = "avatar"
             st.session_state.preview_name = st.session_state.get("preview_name_front")
         st.button("✅ Generate Avatars (ZIP)", key="gen_avatar_btn")
     with c2:
-        avatar_preview_placeholder = st.empty()  # persistent preview area
+        avatar_preview_placeholder = st.empty()
 
 with t2:
     c3, c4 = st.columns([1,2])
     with c3:
-        side_files = st.file_uploader("Upload side profile images", type=["tif","tiff","png","jpg","jpeg"], accept_multiple_files=True, key="side_upl")
-        if side_files:
-            _buffer_uploads(side_files, "side")
+        sf = st.file_uploader("Upload side profile images", type=["tif","tiff","png","jpg","jpeg"], accept_multiple_files=True, key="side_upl")
+        if sf: _buffer_uploads(sf, "side")
         if st.session_state.side_names:
             st.selectbox("Preview image", st.session_state.side_names, key="preview_name_side")
             st.session_state.preview_kind = "hero"
             st.session_state.preview_name = st.session_state.get("preview_name_side")
         st.button("✅ Generate Heroes (ZIP)", key="gen_hero_btn")
     with c4:
-        hero_preview_placeholder = st.empty()  # persistent preview area
+        hero_preview_placeholder = st.empty()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Cached heavy steps (keyed by file bytes)
+# Cached heavy steps
 @st.cache_data(show_spinner=False)
 def load_img_from_bytes(b, max_dim=2600):
     try:
         img = Image.open(io.BytesIO(b))
-        img.load()
+        img.load()  # decode (TIFF LZW supported by Pillow)
         if img.mode != "RGBA":
             img = img.convert("RGBA")
         w,h = img.size
@@ -154,11 +160,9 @@ def load_img_from_bytes(b, max_dim=2600):
 
 @st.cache_data(show_spinner=False)
 def mediapipe_landmarks_from_bytes(b):
-    if not MP_OK:
-        return None
+    if not MP_OK: return None
     img = load_img_from_bytes(b)
-    if img is None:
-        return None
+    if img is None: return None
     arr = np.array(img.convert("RGB"))
     mp_face = mp.solutions.face_mesh
     with mp_face.FaceMesh(static_image_mode=True, refine_landmarks=True, max_num_faces=1, min_detection_confidence=0.5) as fm:
@@ -167,8 +171,7 @@ def mediapipe_landmarks_from_bytes(b):
             return None
         lm = res.multi_face_landmarks[0].landmark
         H, W = arr.shape[0], arr.shape[1]
-        pts = np.array([[p.x*W, p.y*H] for p in lm], dtype=np.float32)
-        return pts
+        return np.array([[p.x*W, p.y*H] for p in lm], dtype=np.float32)
 
 # Haar cascades
 FRONTAL = cv2.CascadeClassifier(cv2.data.haarcascades+"haarcascade_frontalface_default.xml")
@@ -184,14 +187,14 @@ def face_box(pil_img):
         faces_flip = PROFILE.detectMultiScale(gray_flipped, 1.1, 3, flags=cv2.CASCADE_SCALE_IMAGE, minSize=(60,60))
         if len(faces_flip) > 0:
             h, w = gray.shape
-            faces = [(w-(x+wf), y, wf, hf) for (x, y, wf, hf) in faces_flip]
+            faces = [(w-(x+wf), y, wf, hf) for (x,y,wf,hf) in faces_flip]
     if len(faces) == 0:
         return None
-    x, y, w, h = [int(v) for v in sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]]
-    return (x, y, w, h)
+    x,y,w,h = [int(v) for v in sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]]
+    return (x,y,w,h)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Landmark helpers (hair top, deskew, etc.)
+# Landmark helpers
 if MP_OK:
     mp_seg  = mp.solutions.selfie_segmentation
     LM_CHIN = 152
@@ -275,7 +278,7 @@ if MP_OK:
         return pil_img.rotate(-ang, resample=Image.BICUBIC, expand=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Core crop logic
+# Crop helpers
 def clean_base(filename):
     base = os.path.splitext(filename)[0]
     if "-" in base:
@@ -308,9 +311,8 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     cx = x + w/2.0
     W_img, H_img = pil_img.size
 
-    # key ys
     eye_y, chin_y, forehead_y, eye_x = eye_chin_forehead_y(landmarks)
-    # hair top
+    # Hair top (seg → grad → fallback)
     top_y = None
     if MP_OK and hair_safe:
         top_y = hair_top_seg(pil_img, x_center=cx, face_w=w, forehead_y=forehead_y)
@@ -384,68 +386,62 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     return crop, dbg
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Preview & export helpers
+# Preview & export
 
 def _render_preview(kind, name):
-    if not kind or not name:
-        return
-    # resolve bytes/name
+    if not kind or not name: return
     if kind == "avatar":
-        if name not in st.session_state.front_names: 
-            return
+        if name not in st.session_state.front_names: return
         idx = st.session_state.front_names.index(name)
         b = st.session_state.front_bufs[idx]
     else:
-        if name not in st.session_state.side_names:
-            return
+        if name not in st.session_state.side_names: return
         idx = st.session_state.side_names.index(name)
         b = st.session_state.side_bufs[idx]
 
     img = load_img_from_bytes(b)
-    if img is None:
-        st.error("Could not decode image.")
-        return
+    if img is None: st.error("Could not decode image."); return
     f = face_box(img)
-    if f is None:
-        st.error("No face detected.")
-        return
+    if f is None: st.error("No face detected."); return
 
-    # landmarks
     lm = mediapipe_landmarks_from_bytes(b) if MP_OK else None
     if auto_straighten and lm is not None and MP_OK:
-        img = deskew_by_eyes(img, lm)  # (light preview approximation)
-        # optional: recompute lm for perfect accuracy; preview can reuse cached
+        img = deskew_by_eyes(img, lm)  # preview: acceptable without recompute
 
-    # choose a preview size (first selection of that kind)
     sizes = avatar_opts if kind=="avatar" else hero_opts
     if not sizes:
-        st.info("Select at least one export size in the sidebar.")
-        return
-    s = sizes[0]
-    w, h = map(int, s.split("x"))
+        st.info("Select at least one export size in the sidebar."); return
 
-    if lm is not None and MP_OK:
-        crop, dbg = crop_landmarks(img, f, lm, s, kind)
-    else:
-        crop, dbg = crop_center(img, f, (w,h), kind)
-    out = crop.resize((w,h), Image.LANCZOS)
+    # Compact grid: exact pixel previews (no auto-resize)
+    cols = st.columns(2) if len(sizes) > 1 else [st]
+    ci = 0
+    for s in sizes:
+        w, h = map(int, s.split("x"))
+        if lm is not None and MP_OK:
+            crop, dbg = crop_landmarks(img, f, lm, s, kind)
+        else:
+            crop, dbg = crop_center(img, f, (w, h), kind)
+        out = crop.resize((w, h), Image.LANCZOS)
 
-    # overlay guides
-    if debug:
-        pr = np.array(out)
-        tgt = TARGETS[kind][s]
-        ey = int(tgt["eye"]  * h)
-        cy = int(tgt["chin"] * h)
-        cv2.line(pr, (0, ey), (w-1, ey), (255, 0, 0), 1)
-        cv2.line(pr, (0, cy), (w-1, cy), (255, 0, 0), 1)
-        if dbg and "top_y" in dbg and "crop_top" in dbg and "crop_bottom" in dbg:
-            scale_y = h / float((dbg["crop_bottom"] - dbg["crop_top"]) or 1.0)
-            hy = int((dbg["top_y"] - dbg["crop_top"]) * scale_y)
-            hy = np.clip(hy, 0, h-1)
-            cv2.line(pr, (0, hy), (w-1, hy), (0, 255, 255), 1)
-        st.image(pr, caption=f"Live preview • {name} • {s}", use_column_width=True)
-    else:
-        st.image(out, caption=f"Live preview • {name} • {s}", use_column_width=True)
+        if debug:
+            pr = np.array(out)
+            tgt = TARGETS[kind][s]
+            ey = int(tgt["eye"]  * h)
+            cy = int(tgt["chin"] * h)
+            cv2.line(pr, (0, ey), (w-1, ey), (255, 0, 0), 1)
+            cv2.line(pr, (0, cy), (w-1, cy), (255, 0, 0), 1)
+            if dbg and "top_y" in dbg and "crop_top" in dbg and "crop_bottom" in dbg:
+                scale_y = h / float((dbg["crop_bottom"] - dbg["crop_top"]) or 1.0)
+                hy = int((dbg["top_y"] - dbg["crop_top"]) * scale_y)
+                hy = np.clip(hy, 0, h-1)
+                cv2.line(pr, (0, hy), (w-1, hy), (0, 255, 255), 1)
+            img_show = pr
+        else:
+            img_show = out
+
+        with cols[ci]:
+            st.image(img_show, caption=f"Live preview • {s}", use_column_width=False, width=w)
+        ci = (ci + 1) % len(cols)
 
 def _process_batch(bufs, names, sizes, label):
     if not bufs or not sizes:
@@ -454,25 +450,21 @@ def _process_batch(bufs, names, sizes, label):
     with zipfile.ZipFile(mem, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name, b in zip(names, bufs):
             img = load_img_from_bytes(b)
-            if img is None:
-                st.warning(f"Skip {name}: decode error"); continue
+            if img is None: st.warning(f"Skip {name}: decode error"); continue
             f = face_box(img)
-            if f is None:
-                st.warning(f"Skip {name}: no face"); continue
+            if f is None: st.warning(f"Skip {name}: no face"); continue
             lm = mediapipe_landmarks_from_bytes(b) if MP_OK else None
             if auto_straighten and lm is not None and MP_OK:
                 img = deskew_by_eyes(img, lm)
-                # export can reuse previous landmarks; acceptable for batch
-
             base = clean_base(name)
             for s in sizes:
                 kind = "avatar" if label=="avatar" else "hero"
                 w, h = map(int, s.split("x"))
                 if lm is not None and MP_OK:
-                    crop, dbg = crop_landmarks(img, f, lm, s, kind)
+                    crop, _ = crop_landmarks(img, f, lm, s, kind)
                 else:
-                    crop, dbg = crop_center(img, f, (w,h), kind)
-                out = crop.resize((w,h), Image.LANCZOS)
+                    crop, _ = crop_center(img, f, (w, h), kind)
+                out = crop.resize((w, h), Image.LANCZOS)
                 buf = io.BytesIO()
                 out.save(buf, format="PNG", optimize=True)
                 zf.writestr(f"{base}-{label}_{w}x{h}.png", buf.getvalue())
@@ -480,7 +472,7 @@ def _process_batch(bufs, names, sizes, label):
     st.download_button(f"⬇️ Download {label.title()} ZIP", mem, file_name=f"{label}_images.zip", mime="application/zip")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Live preview (persistent) — updates on every slider move without losing uploads
+# Live preview (persistent)
 with t1:
     if st.session_state.preview_kind == "avatar" and st.session_state.preview_name:
         with avatar_preview_placeholder:
@@ -495,36 +487,30 @@ with t2:
 with t1:
     if st.session_state.get("gen_avatar_btn"):
         _process_batch(st.session_state.front_bufs, st.session_state.front_names, avatar_opts, "avatar")
-
 with t2:
     if st.session_state.get("gen_hero_btn"):
         _process_batch(st.session_state.side_bufs, st.session_state.side_names, hero_opts, "hero")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Drag-to-crop mode (single image) — with aspect_ratio FIX (tuple)
+# Drag-to-crop mode (single) — aspect_ratio FIX (tuple)
 if mode == "Drag-to-crop (single)":
     st.markdown("---")
     st.subheader("Drag-to-crop (single image)")
     if not CROPPER_OK:
         st.error("Drag mode requires `streamlit-cropper==0.2.2` in requirements.txt.")
     else:
-        # pick current preview image (front preferred if available)
         pk, pn = st.session_state.preview_kind, st.session_state.preview_name
         if not pk or not pn:
             st.info("Select a preview image above first.")
         else:
             if pk == "avatar":
-                if pn not in st.session_state.front_names:
-                    st.warning("Preview image not found in session."); st.stop()
-                idx = st.session_state.front_names.index(pn)
-                b = st.session_state.front_bufs[idx]
-                kind = "avatar"; sizes = avatar_opts
+                if pn not in st.session_state.front_names: st.warning("Preview image not found."); st.stop()
+                idx = st.session_state.front_names.index(pn); b = st.session_state.front_bufs[idx]
+                kind, sizes = "avatar", avatar_opts
             else:
-                if pn not in st.session_state.side_names:
-                    st.warning("Preview image not found in session."); st.stop()
-                idx = st.session_state.side_names.index(pn)
-                b = st.session_state.side_bufs[idx]
-                kind = "hero"; sizes = hero_opts
+                if pn not in st.session_state.side_names: st.warning("Preview image not found."); st.stop()
+                idx = st.session_state.side_names.index(pn); b = st.session_state.side_bufs[idx]
+                kind, sizes = "hero", hero_opts
 
             if not sizes:
                 st.warning("Select at least one size in the sidebar.")
@@ -543,9 +529,8 @@ if mode == "Drag-to-crop (single)":
                     cv2.line(arr,(0,cy),(arr.shape[1]-1,cy),(255,0,0),1)
                     prev2 = Image.fromarray(arr)
 
-                    # ✅ FIX: aspect_ratio must be a (w, h) tuple, not a float
-                    if not (w0 > 0 and h0 > 0):
-                        w0, h0 = 1, 1  # guard
+                    # aspect_ratio must be a (w, h) tuple
+                    if not (w0>0 and h0>0): w0,h0 = 1,1
                     rect = st_cropper(
                         prev2,
                         aspect_ratio=(float(w0), float(h0)),
@@ -558,16 +543,13 @@ if mode == "Drag-to-crop (single)":
                         scale = img.size[0]/prev.size[0]
                         L=int(rect['left']*scale); T=int(rect['top']*scale)
                         R=int((rect['left']+rect['width'])*scale); B=int((rect['top']+rect['height'])*scale)
-                        L = max(0, min(L, img.size[0]-1))
-                        T = max(0, min(T, img.size[1]-1))
-                        R = max(L+1, min(R, img.size[0]))
-                        B = max(T+1, min(B, img.size[1]))
+                        L = max(0, min(L, img.size[0]-1)); T = max(0, min(T, img.size[1]-1))
+                        R = max(L+1, min(R, img.size[0]));   B = max(T+1, min(B, img.size[1]))
                         manual = img.crop((L,T,R,B))
                         st.success("Manual crop locked for this image and will be used when you export.")
-                        # Show previews for all selected sizes using this manual crop
                         for s in sizes:
                             w,h = map(int, s.split("x"))
                             out = manual.resize((w,h), Image.LANCZOS)
-                            st.image(out, caption=f"Manual Preview • {pn} • {s}", use_column_width=True)
+                            st.image(out, caption=f"Manual Preview • {pn} • {s}", use_column_width=False, width=w)
                     else:
                         st.warning("Drag a box over the image to set the crop.")
