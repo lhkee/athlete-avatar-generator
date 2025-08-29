@@ -4,7 +4,7 @@ import cv2
 from PIL import Image
 import io, os, zipfile, sys, requests
 
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Hard-coded guide overlay URLs (GitHub raw)
 GUIDE_URLS = {
     "256x256":  "https://raw.githubusercontent.com/lhkee/athlete-avatar-generator/ae2815490a0ad2861801054277022572b1a06eee/256x256-guide.png",
@@ -13,8 +13,33 @@ GUIDE_URLS = {
     "1500x920": "https://raw.githubusercontent.com/lhkee/athlete-avatar-generator/934f591fa238f6f597816307a6fc655792e15279/1500x920-guide.png",
 }
 
-# ─────────────────────────────────────────────
-# Overlay + frame helpers
+# Fallback targets (only used if a guide fails to load)
+TARGETS = {
+    "avatar": {"256x256":{"eye":0.44,"chin":0.832}, "500x345":{"eye":0.44,"chin":0.835}},
+    "hero":   {"1200x1165":{"eye":0.35,"chin":0.418}, "1500x920":{"eye":0.35,"chin":0.417}},
+}
+
+# Headroom/footroom cushions (still applied on top of guide lines)
+HAIR_MARGIN     = {"avatar":0.022, "hero":0.018}   # *th* units
+BOTTOM_MARGIN   = {"avatar":0.024, "hero":0.020}
+HAIR_TALL_BONUS = {"avatar":0.010, "hero":0.006}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Page
+st.set_page_config(page_title="Athlete Image Generator", layout="wide")
+st.markdown("""
+<style>
+div.block-container{padding-top:1rem;padding-bottom:2rem;}
+section[data-testid="stSidebar"] .stSlider,
+section[data-testid="stSidebar"] .stMultiSelect,
+section[data-testid="stSidebar"] .stRadio{margin-bottom:.35rem;}
+.stButton>button{height:2.2rem;padding:0 .9rem;}
+</style>
+""", unsafe_allow_html=True)
+st.title("🏋️ Athlete Image Generator — Auto + Guided tweak")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Overlays / guides / frame
 @st.cache_data(show_spinner=False)
 def _load_overlay_from_url(url: str, target_w: int, target_h: int):
     if not url or not url.strip():
@@ -34,19 +59,69 @@ def _composite_overlay(base_img: Image.Image, overlay_img: Image.Image) -> Image
         base_img = base_img.convert("RGBA")
     return Image.alpha_composite(base_img, overlay_img)
 
-def _draw_frame_border(img_np: np.ndarray, color=(255,255,255), thickness=1):
+def _draw_frame_border(img_np: np.ndarray, color=(0, 255, 160), thickness=2):
+    """Thick mint border, drawn last so it stays visible atop overlay."""
     h, w = img_np.shape[:2]
-    cv2.rectangle(img_np, (0,0), (w-1,h-1), color, thickness)
+    cv2.rectangle(img_np, (0, 0), (w-1, h-1), color, thickness, lineType=cv2.LINE_AA)
 
-# ─────────────────────────────────────────────
-# Optional cropper (manual drag mode)
+def _find_red_lines(img_rgba: Image.Image):
+    """
+    Detect the three horizontal red lines in a guide PNG.
+    Returns {'top': y, 'head': y, 'chin': y} (pixel rows) or None.
+    """
+    arr = np.array(img_rgba.convert("RGB"))
+    H, W = arr.shape[:2]
+    R, G, B = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+    red = (R > 180) & (G < 70) & (B < 70)
+
+    counts = red.sum(axis=1)
+    thresh = max(int(0.35 * W), 8)  # must span at least 35% of width
+    rows = np.where(counts >= thresh)[0]
+    if rows.size == 0:
+        return None
+
+    lines, start, prev = [], rows[0], rows[0]
+    for r in rows[1:]:
+        if r == prev + 1:
+            prev = r
+            continue
+        lines.append((start, prev))
+        start = r
+        prev = r
+    lines.append((start, prev))
+    centers = sorted([int((a + b) / 2) for a, b in lines])
+
+    if len(centers) < 2:
+        return None
+    if len(centers) > 3:
+        top, bottom = centers[0], centers[-1]
+        mid = min(centers[1:-1], key=lambda y: abs(y - (top + bottom) / 2))
+        centers = [top, mid, bottom]
+
+    top_y, head_y, chin_y = centers[0], centers[1], centers[-1]
+    return {"top": top_y, "head": head_y, "chin": chin_y}
+
+@st.cache_data(show_spinner=False)
+def guide_targets_from_url(url: str, target_w: int, target_h: int):
+    """Return {'eye': frac, 'chin': frac, 'top_frac': frac} (y/h fractions)."""
+    ov = _load_overlay_from_url(url, target_w, target_h)
+    if ov is None:
+        return None
+    ys = _find_red_lines(ov)
+    if ys is None:
+        return None
+    h = float(target_h)
+    return {"eye": ys["head"]/h, "chin": ys["chin"]/h, "top_frac": ys["top"]/h}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Optional cropper import (not used in guided mode anymore, but kept to avoid breaking older deployments)
 try:
-    from streamlit_cropper import st_cropper
+    from streamlit_cropper import st_cropper  # noqa: F401
     CROPPER_OK = True
 except Exception:
     CROPPER_OK = False
 
-# Optional Mediapipe (landmarks + segmentation for hair-safe)
+# Optional Mediapipe (landmarks + segmentation)
 try:
     import mediapipe as mp
     MP_OK = True
@@ -54,36 +129,19 @@ except Exception:
     MP_OK = False
     mp = None
 
-# ─────────────────────────────────────────────
-# Page + compact layout
-st.set_page_config(page_title="Athlete Image Generator", layout="wide")
-st.markdown("""
-<style>
-div.block-container{padding-top:1rem;padding-bottom:2rem;}
-section[data-testid="stSidebar"] .stSlider,
-section[data-testid="stSidebar"] .stMultiSelect,
-section[data-testid="stSidebar"] .stRadio{margin-bottom:.35rem;}
-.stButton>button{height:2.2rem;padding:0 .9rem;}
-</style>
-""", unsafe_allow_html=True)
-st.title("🏋️ Athlete Image Generator — Auto + Manual")
-
-# Targets and safety constants
-TARGETS = {
-    "avatar": {"256x256":{"eye":0.44,"chin":0.832}, "500x345":{"eye":0.44,"chin":0.835}},
-    "hero":   {"1200x1165":{"eye":0.35,"chin":0.418}, "1500x920":{"eye":0.35,"chin":0.417}},
-}
-HAIR_MARGIN = {"avatar":0.022,"hero":0.018}
-BOTTOM_MARGIN={"avatar":0.024,"hero":0.020}
-HAIR_TALL_BONUS={"avatar":0.010,"hero":0.006}
-
+# ──────────────────────────────────────────────────────────────────────────────
 # Sidebar controls
 with st.sidebar:
     st.markdown("### Controls")
-    mode = st.radio("Manual Mode", ["Off (Auto only)", "Sliders (batch)", "Drag-to-crop (single)"], index=1)
+    mode = st.radio(
+        "Manual Mode",
+        ["Off (Auto only)", "Sliders (batch)", "Guided tweak (single)"],
+        index=2
+    )
     debug = st.toggle("Debug overlay (fallback)", value=False)
     auto_straighten = st.toggle("Auto-straighten (eyes)", value=True)
     hair_safe = st.toggle("Hair-safe segmentation", value=True)
+
     st.markdown("---")
     show_frame = st.toggle("Show crop frame border (preview)", value=True)
 
@@ -120,13 +178,13 @@ with st.sidebar:
         f"Cropper: {'OK' if CROPPER_OK else 'N/A'}"
     )
 
-# Session state to persist uploads
+# ──────────────────────────────────────────────────────────────────────────────
+# Session state
 for k in ["front_bufs","side_bufs","front_names","side_names","preview_kind","preview_name"]:
     if k not in st.session_state:
         st.session_state[k] = [] if "bufs" in k or "names" in k else None
 
-def _read_all_bytes(up):
-    b = up.read(); up.seek(0); return b
+def _read_all_bytes(up): b = up.read(); up.seek(0); return b
 
 def _buffer_uploads(files, which):
     if not files: return
@@ -142,7 +200,8 @@ def _buffer_uploads(files, which):
     else:
         st.session_state.side_bufs, st.session_state.side_names   = bufs, names
 
-# Uploaders + placeholders
+# ──────────────────────────────────────────────────────────────────────────────
+# Uploaders + live preview placeholders
 t1, t2 = st.tabs(["Avatars (front)", "Heroes (side)"])
 with t1:
     c1, c2 = st.columns([1,2])
@@ -170,7 +229,8 @@ with t2:
     with c4:
         hero_preview_placeholder = st.empty()
 
-# Cached heavy steps
+# ──────────────────────────────────────────────────────────────────────────────
+# Image loading / landmarks / detection
 @st.cache_data(show_spinner=False)
 def load_img_from_bytes(b, max_dim=2600):
     try:
@@ -201,7 +261,6 @@ def mediapipe_landmarks_from_bytes(b):
         H, W = arr.shape[0], arr.shape[1]
         return np.array([[p.x*W, p.y*H] for p in lm], dtype=np.float32)
 
-# Haar cascades
 FRONTAL = cv2.CascadeClassifier(cv2.data.haarcascades+"haarcascade_frontalface_default.xml")
 PROFILE = cv2.CascadeClassifier(cv2.data.haarcascades+"haarcascade_profileface.xml")
 
@@ -221,7 +280,7 @@ def face_box(pil_img):
     x,y,w,h = [int(v) for v in sorted(faces, key=lambda b: b[2]*b[3], reverse=True)[0]]
     return (x,y,w,h)
 
-# Landmark helpers
+# Landmark helpers (only used when mediapipe is available)
 if MP_OK:
     mp_seg  = mp.solutions.selfie_segmentation
     LM_CHIN = 152
@@ -287,10 +346,10 @@ if MP_OK:
         upper_h = max(eye_y - forehead_y, 1.0)
         ratio = face_h / upper_h
         adj = dict(eye_bias=0.0, scale_bias=1.0, shift_bias=0.0)
-        if ratio < 1.5:
+        if ratio < 1.5:      # wider faces
             adj["eye_bias"]   = -0.012
             adj["shift_bias"] = -0.015
-        elif ratio > 2.2:
+        elif ratio > 2.2:    # longer faces
             adj["eye_bias"]   = +0.015
             adj["scale_bias"] = 1.035
             adj["shift_bias"] = +0.012
@@ -304,7 +363,8 @@ if MP_OK:
         if abs(ang) < 1.5: return pil_img
         return pil_img.rotate(-ang, resample=Image.BICUBIC, expand=True)
 
-# Crop helpers
+# ──────────────────────────────────────────────────────────────────────────────
+# Cropping helpers
 def clean_base(filename):
     base = os.path.splitext(filename)[0]
     if "-" in base:
@@ -337,7 +397,9 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     cx = x + w/2.0
     W_img, H_img = pil_img.size
 
+    # Landmarks
     eye_y, chin_y, forehead_y, eye_x = eye_chin_forehead_y(landmarks)
+
     # Hair top (seg → grad → fallback)
     top_y = None
     if MP_OK and hair_safe:
@@ -347,24 +409,39 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     if top_y is None:
         top_y = max(0.0, (y - 0.10 * H_img))
 
-    adj = face_shape_adj(eye_y, chin_y, forehead_y) if MP_OK else dict(eye_bias=0.0, scale_bias=1.0, shift_bias=0.0)
-    tgt = TARGETS[kind][target_label].copy()
-    tgt["eye"] = np.clip(tgt["eye"] + adj.get("eye_bias",0.0) + (man_eye_bias * 0.001), 0.05, 0.95)
+    # Guide dictates the targets
+    t_from_guide = guide_targets_from_url(GUIDE_URLS.get(target_label, ""), tw, th)
+    if t_from_guide:
+        tgt_eye  = float(t_from_guide["eye"])
+        tgt_chin = float(t_from_guide["chin"])
+        hair_top_target = float(t_from_guide["top_frac"])
+    else:
+        tgt = TARGETS[kind][target_label].copy()
+        tgt_eye  = float(tgt["eye"])
+        tgt_chin = float(tgt["chin"])
+        hair_top_target = 0.05
 
-    crop_h = (chin_y - eye_y) / max((tgt["chin"] - tgt["eye"]), 1e-6)
+    # Face-shape fine-tune
+    adj = face_shape_adj(eye_y, chin_y, forehead_y) if MP_OK else dict(eye_bias=0.0, scale_bias=1.0, shift_bias=0.0)
+
+    # Slider bias on eye placement (‰ to keep it subtle)
+    tgt_eye = np.clip(tgt_eye + adj.get("eye_bias",0.0) + (man_eye_bias * 0.001), 0.05, 0.95)
+
+    # Map (chin-eye) onto (tgt_chin - tgt_eye) to determine crop_h
+    crop_h = (chin_y - eye_y) / max((tgt_chin - tgt_eye), 1e-6)
     crop_h *= adj.get("scale_bias", 1.0) * (1.0 + man_scale/100.0)
 
-    crop_top = eye_y - tgt["eye"] * crop_h
+    # Place so that eyes hit the target eye row
+    crop_top = eye_y - tgt_eye * crop_h
     crop_top += adj.get("shift_bias", 0.0) * th + man_vshift
 
-    hair_span = (forehead_y - top_y) / max(H_img, 1.0)
-    top_margin = HAIR_MARGIN[kind] * th
-    if hair_span > 0.20:
-        top_margin += HAIR_TALL_BONUS[kind] * th
-    top_margin += man_hair_margin
-    if (top_y - crop_top) < top_margin:
-        crop_top = max(0.0, top_y - top_margin)
+    # Enforce hair headspace based on guide's top line
+    top_target_px = hair_top_target * crop_h
+    need_margin = top_target_px + man_hair_margin + (HAIR_MARGIN[kind]*th)
+    if (top_y - crop_top) < need_margin:
+        crop_top = max(0.0, top_y - need_margin)
 
+    # Chin safety margin
     crop_bottom = crop_top + crop_h
     bottom_margin = BOTTOM_MARGIN[kind] * th + man_chin_margin
     delta = (chin_y + bottom_margin) - crop_bottom
@@ -382,6 +459,7 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     crop_left = cx - crop_w/2.0
     crop_right = crop_left + crop_w
 
+    # Clamp to image bounds
     if crop_left < 0:
         crop_right -= crop_left; crop_left = 0
     if crop_right > W_img:
@@ -399,6 +477,7 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     B = int(min(H_img, round(crop_bottom)))
 
     if R <= L+10 or B <= T+10:
+        # Emergency fallback
         ar2 = tw/float(th)
         x0,y0,fw,fh = (x,y,w,h)
         ch2 = int(max(fh*1.6, 60))
@@ -411,7 +490,8 @@ def crop_landmarks(pil_img, face_box, landmarks, target_label, kind):
     dbg = {"crop_top": float(T), "crop_bottom": float(B), "top_y": float(top_y)}
     return crop, dbg
 
-# Preview & export
+# ──────────────────────────────────────────────────────────────────────────────
+# Previews and export
 def _render_preview(kind, name):
     if not kind or not name: return
     if kind == "avatar":
@@ -430,7 +510,7 @@ def _render_preview(kind, name):
 
     lm = mediapipe_landmarks_from_bytes(b) if MP_OK else None
     if auto_straighten and lm is not None and MP_OK:
-        img = deskew_by_eyes(img, lm)  # preview acceptable without recompute
+        img = deskew_by_eyes(img, lm)
 
     sizes = avatar_opts if kind=="avatar" else hero_opts
     if not sizes:
@@ -446,7 +526,6 @@ def _render_preview(kind, name):
             crop, dbg = crop_center(img, f, (w, h), kind)
         out = crop.resize((w, h), Image.LANCZOS)
 
-        # Compose: base -> guide (URL) or debug -> frame -> show exact pixels
         preview_img = out
         overlay = _load_overlay_from_url(GUIDE_URLS.get(s, ""), w, h)
         if overlay is not None:
@@ -470,10 +549,10 @@ def _render_preview(kind, name):
                 preview_np = np.array(preview_img)
 
         if show_frame:
-            _draw_frame_border(preview_np, (255,255,255), 1)
+            _draw_frame_border(preview_np, (0,255,160), 2)
 
         with cols[ci]:
-            st.image(preview_np, caption=f"Live preview • {s}", use_column_width=False, width=w)
+            st.image(preview_np, caption=f"Live preview • {s}", use_column_width=False, width=int(round(w*0.75)))
         ci = (ci + 1) % len(cols)
 
 def _process_batch(bufs, names, sizes, label):
@@ -504,7 +583,8 @@ def _process_batch(bufs, names, sizes, label):
     mem.seek(0)
     st.download_button(f"⬇️ Download {label.title()} ZIP", mem, file_name=f"{label}_images.zip", mime="application/zip")
 
-# Live preview (persistent)
+# ──────────────────────────────────────────────────────────────────────────────
+# Live preview for the currently selected image
 with t1:
     if st.session_state.preview_kind == "avatar" and st.session_state.preview_name:
         with avatar_preview_placeholder:
@@ -514,7 +594,7 @@ with t2:
         with hero_preview_placeholder:
             _render_preview("hero", st.session_state.preview_name)
 
-# Actions
+# Batch actions
 with t1:
     if st.session_state.get("gen_avatar_btn"):
         _process_batch(st.session_state.front_bufs, st.session_state.front_names, avatar_opts, "avatar")
@@ -522,77 +602,95 @@ with t2:
     if st.session_state.get("gen_hero_btn"):
         _process_batch(st.session_state.side_bufs, st.session_state.side_names, hero_opts, "hero")
 
-# Drag-to-crop (single) — aspect_ratio tuple fix
-if mode == "Drag-to-crop (single)":
+# ──────────────────────────────────────────────────────────────────────────────
+# Guided tweak (single) – starts from auto-crop, tweak via zoom/shift only
+if mode == "Guided tweak (single)":
     st.markdown("---")
-    st.subheader("Drag-to-crop (single image)")
-    if not CROPPER_OK:
-        st.error("Drag mode requires `streamlit-cropper==0.2.2` in requirements.txt.")
+    st.subheader("Guided tweak (single image)")
+
+    pk, pn = st.session_state.preview_kind, st.session_state.preview_name
+    if not pk or not pn:
+        st.info("Select a preview image above first.")
     else:
-        pk, pn = st.session_state.preview_kind, st.session_state.preview_name
-        if not pk or not pn:
-            st.info("Select a preview image above first.")
+        if pk == "avatar":
+            if pn not in st.session_state.front_names:
+                st.warning("Preview image not found."); st.stop()
+            idx = st.session_state.front_names.index(pn); b = st.session_state.front_bufs[idx]
+            kind, sizes = "avatar", avatar_opts
         else:
-            if pk == "avatar":
-                if pn not in st.session_state.front_names: st.warning("Preview image not found."); st.stop()
-                idx = st.session_state.front_names.index(pn); b = st.session_state.front_bufs[idx]
-                kind, sizes = "avatar", avatar_opts
+            if pn not in st.session_state.side_names:
+                st.warning("Preview image not found."); st.stop()
+            idx = st.session_state.side_names.index(pn); b = st.session_state.side_bufs[idx]
+            kind, sizes = "hero", hero_opts
+
+        if not sizes:
+            st.warning("Select at least one size in the sidebar.")
+        else:
+            img = load_img_from_bytes(b)
+            if img is None:
+                st.error("Could not decode image.")
             else:
-                if pn not in st.session_state.side_names: st.warning("Preview image not found."); st.stop()
-                idx = st.session_state.side_names.index(pn); b = st.session_state.side_bufs[idx]
-                kind, sizes = "hero", hero_opts
+                f = face_box(img)
+                if f is None:
+                    st.error("No face detected."); st.stop()
+                lm = mediapipe_landmarks_from_bytes(b) if MP_OK else None
+                base_img = img
+                if auto_straighten and lm is not None and MP_OK:
+                    base_img = deskew_by_eyes(img, lm)
 
-            if not sizes:
-                st.warning("Select at least one size in the sidebar.")
-            else:
-                img = load_img_from_bytes(b)
-                if img is None:
-                    st.error("Could not decode image.")
-                else:
-                    w0, h0 = map(int, sizes[0].split("x"))
-                    prev_w = min(900, img.size[0])
-                    prev = img.convert("RGB").resize((prev_w, int(img.size[1]*(prev_w/img.size[0]))), Image.LANCZOS)
-                    arr = np.array(prev).copy()
-                    tgt = TARGETS[kind][sizes[0]]
-                    ey = int(tgt["eye"]  * arr.shape[0]); cy = int(tgt["chin"] * arr.shape[0])
-                    cv2.line(arr,(0,ey),(arr.shape[1]-1,ey),(255,0,0),1)
-                    cv2.line(arr,(0,cy),(arr.shape[1]-1,cy),(255,0,0),1)
-                    prev2 = Image.fromarray(arr)
+                zcol, vcol = st.columns([1,1])
+                with zcol:
+                    zoom_pct = st.slider("Zoom (±10%)", -10, 10, 0, help="Adjust crop scale around face")
+                with vcol:
+                    vshift_px = st.slider("Vertical shift (±40 px)", -40, 40, 0, help="Nudge crop up/down")
 
-                    # Overlay the size-specific guide in drag preview too
-                    url = GUIDE_URLS.get(f"{w0}x{h0}", "")
-                    if url:
-                        ov = _load_overlay_from_url(url, prev2.size[0], prev2.size[1])
-                        if ov:
-                            prev2 = Image.alpha_composite(prev2.convert("RGBA"), ov)
-
-                    if not (w0>0 and h0>0): w0,h0 = 1,1
-                    rect = st_cropper(
-                        prev2,
-                        aspect_ratio=(float(w0), float(h0)),  # tuple, not float
-                        box_color='#00E0AA',
-                        return_type='box',
-                        key=f"crop_box_{pn.replace('.', '_')}"
-                    )
-
-                    if rect and all(k in rect for k in ("left","top","width","height")):
-                        scale = img.size[0]/prev.size[0]
-                        L=int(rect['left']*scale); T=int(rect['top']*scale)
-                        R=int((rect['left']+rect['width'])*scale); B=int((rect['top']+rect['height'])*scale)
-                        L = max(0, min(L, img.size[0]-1)); T = max(0, min(T, img.size[1]-1))
-                        R = max(L+1, min(R, img.size[0]));   B = max(T+1, min(B, img.size[1]))
-                        manual = img.crop((L,T,R,B))
-                        st.success("Manual crop locked for this image and will be used when you export.")
-                        for s in sizes:
-                            w,h = map(int, s.split("x"))
-                            out = manual.resize((w,h), Image.LANCZOS)
-                            # show same overlay + frame in manual previews
-                            overlay = _load_overlay_from_url(GUIDE_URLS.get(s, ""), w, h)
-                            if overlay is not None:
-                                outp = np.array(_composite_overlay(out, overlay))
-                            else:
-                                outp = np.array(out)
-                            if show_frame: _draw_frame_border(outp, (255,255,255), 1)
-                            st.image(outp, caption=f"Manual Preview • {pn} • {s}", use_column_width=False, width=w)
+                cols = st.columns(2) if len(sizes) > 1 else [st]
+                ci = 0
+                for s in sizes:
+                    w, h = map(int, s.split("x"))
+                    # 1) best auto-crop
+                    if lm is not None and MP_OK:
+                        crop, dbg = crop_landmarks(base_img, f, lm, s, kind)
                     else:
-                        st.warning("Drag a box over the image to set the crop.")
+                        crop, dbg = crop_center(base_img, f, (w, h), kind)
+
+                    # 2) apply tweaks in image space
+                    if zoom_pct != 0 or vshift_px != 0:
+                        cw, ch = crop.size
+                        # derive a center reference (approx from dbg or image center)
+                        if dbg and all(k in dbg for k in ("crop_top","crop_bottom")):
+                            ct = int(dbg["crop_top"]); cb = int(dbg["crop_bottom"])
+                            cy = (ct + cb) // 2
+                        else:
+                            cy = base_img.size[1] // 2
+                        cx = base_img.size[0] // 2
+
+                        # Zoom
+                        if zoom_pct != 0:
+                            factor = 1.0 + (zoom_pct / 100.0)
+                            new_w = int(np.clip(cw * factor, 20, base_img.size[0]))
+                            new_h = int(np.clip(ch * factor, 20, base_img.size[1]))
+                            L = int(np.clip(cx - new_w//2, 0, base_img.size[0]-new_w))
+                            T = int(np.clip(cy - new_h//2, 0, base_img.size[1]-new_h))
+                            crop = base_img.crop((L, T, L+new_w, T+new_h))
+                            cw, ch = crop.size
+
+                        # Vertical shift
+                        if vshift_px != 0:
+                            cy = int(np.clip(cy + vshift_px, ch//2, base_img.size[1]-ch//2))
+                            L = int(np.clip(cx - cw//2, 0, base_img.size[0]-cw))
+                            T = int(np.clip(cy - ch//2, 0, base_img.size[1]-ch))
+                            crop = base_img.crop((L, T, L+cw, T+ch))
+
+                    out = crop.resize((w, h), Image.LANCZOS)
+
+                    overlay = _load_overlay_from_url(GUIDE_URLS.get(s, ""), w, h)
+                    if overlay is not None:
+                        prev = np.array(_composite_overlay(out, overlay))
+                    else:
+                        prev = np.array(out)
+                    if show_frame: _draw_frame_border(prev, (0,255,160), 2)
+
+                    with cols[ci]:
+                        st.image(prev, caption=f"Guided preview • {s}", use_column_width=False, width=int(round(w*0.75)))
+                    ci = (ci + 1) % len(cols)
