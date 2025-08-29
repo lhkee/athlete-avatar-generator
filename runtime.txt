@@ -1,1 +1,2 @@
-3.11
+Python: 3.11.x
+Mediapipe: 0.10.14
