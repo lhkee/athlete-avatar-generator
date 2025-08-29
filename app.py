@@ -266,14 +266,14 @@ def render_croppers(kind: str):
         aspect = w_out / float(h_out)
         st.caption("Drag the rectangle to pan; use handles to scale. Live preview matches export.")
         # Use a stable key so the widget remembers the last box
-        crop_box = st_cropper(
-            image=work.convert("RGB"),
-            realtime_update=True,
-            aspect_ratio=aspect,
-            box_color='#FF2B2B',
-            return_type='box',
-            key=f"cropper_{kind}_{pn}_{s}",
-        )
+      crop_box = st_cropper(
+    work.convert("RGB"),      # just pass the image as first arg
+    realtime_update=True,
+    aspect_ratio=aspect,
+    box_color='#FF2B2B',
+    return_type='box',
+    key=f"cropper_{kind}_{pn}_{s}",
+)
 
         # If user moved the box, store it (working coords)
         if crop_box and all(k in crop_box for k in ("left", "top", "width", "height")):
