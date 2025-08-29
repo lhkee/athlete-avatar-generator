@@ -1,4 +1,4 @@
-# app.py — Athlete Image Generator (streamlit-cropper edition)
+# app.py — Athlete Image Generator (streamlit-cropper edition, corrected)
 # - Real-time, reliable drag-to-pan/scale using a crop box
 # - Per-size guides & red frame
 # - Auto-straighten (eyes) toggle
@@ -231,13 +231,11 @@ def render_croppers(kind: str):
         st.info("Select at least one export size in the sidebar.")
         return
 
-    # We build a larger working image so the crop box has room to pan/scale smoothly
-    # (doing this per-size keeps interaction precise for each aspect ratio)
+    # Build a larger working image so the crop box has room to pan/scale smoothly
     for s in sizes:
         w_out, h_out = map(int, s.split("x"))
         st.markdown(f"#### {s}")
 
-        # Build working image ~ double target (but at least 900px each side)
         work = base_img.copy()
         work_w, work_h = max(900, w_out * 2), max(900, h_out * 2)
         work.thumbnail((work_w, work_h), Image.LANCZOS)
@@ -255,28 +253,20 @@ def render_croppers(kind: str):
                 "bottom": int(B * sy),
             }
 
-        # Current box (working coords)
-        box = st.session_state[k]
-        # streamlit-cropper expects a dict: left, top, width, height OR uses its internal state.
-        # We'll pass an initial (persisted) rectangle by giving return_type='box' and recreating with defaults.
-        # NOTE: st_cropper currently doesn't take an explicit "initial box" param officially,
-        # but it restores last user box automatically per widget key. We'll simply keep the key stable per size.
-
-        # Show cropper (fixed aspect ratio)
+        # Show cropper (fixed aspect ratio) — NOTE: image passed as first positional arg
         aspect = w_out / float(h_out)
         st.caption("Drag the rectangle to pan; use handles to scale. Live preview matches export.")
-        # Use a stable key so the widget remembers the last box
-      crop_box = st_cropper(
-    work.convert("RGB"),      # just pass the image as first arg
-    realtime_update=True,
-    aspect_ratio=aspect,
-    box_color='#FF2B2B',
-    return_type='box',
-    key=f"cropper_{kind}_{pn}_{s}",
-)
+        crop_box = st_cropper(
+            work.convert("RGB"),
+            realtime_update=True,
+            aspect_ratio=aspect,
+            box_color='#FF2B2B',
+            return_type='box',
+            key=f"cropper_{kind}_{pn}_{s}",
+        )
 
         # If user moved the box, store it (working coords)
-        if crop_box and all(k in crop_box for k in ("left", "top", "width", "height")):
+        if crop_box and all(k2 in crop_box for k2 in ("left", "top", "width", "height")):
             st.session_state[k] = {
                 "left": int(crop_box["left"]),
                 "top": int(crop_box["top"]),
@@ -330,10 +320,8 @@ def export_zip(bufs, names, sizes, label):
                 # If we have a stored working-box, map it back; else use auto-init
                 k = key_box("avatar" if label == "avatar" else "hero", pn, s)
                 if k in st.session_state:
-                    # map back using same working scale used in render (assumes work built with thumbnail)
-                    # Recreate the same thumbnail dims:
-                    work_w, work_h = max(900, w_out * 2), max(900, h_out * 2)
                     work = img.copy()
+                    work_w, work_h = max(900, w_out * 2), max(900, h_out * 2)
                     work.thumbnail((work_w, work_h), Image.LANCZOS)
                     sx = img.size[0] / work.size[0]
                     sy = img.size[1] / work.size[1]
