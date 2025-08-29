@@ -1,9 +1,9 @@
-# app.py — Athlete Image Generator (streamlit-cropper edition, corrected)
+# app.py — Athlete Image Generator (streamlit-cropper edition, aspect ratio fixed)
 # - Real-time, reliable drag-to-pan/scale using a crop box
 # - Per-size guides & red frame
 # - Auto-straighten (eyes) toggle
 # - TIFF (incl. LZW) supported via Pillow
-# - ZIP export with naming: <base>-avatar_<WxH>.png / <base>-hero_<WxH>.png
+# - ZIP export: <base>-avatar_<WxH>.png / <base>-hero_<WxH>.png
 
 import io
 import os
@@ -16,7 +16,7 @@ import cv2
 from streamlit_cropper import st_cropper
 
 # ───────────────────────────────────────────────────────────────
-# Config & guide overlays (GitHub raw URLs you provided)
+# Guide overlays (GitHub raw URLs you provided)
 GUIDE_URLS = {
     "256x256":   "https://raw.githubusercontent.com/lhkee/athlete-avatar-generator/ae2815490a0ad2861801054277022572b1a06eee/256x256-guide.png",
     "500x345":   "https://raw.githubusercontent.com/lhkee/athlete-avatar-generator/3936a686c65728e1811e9370fadd991125d91e61/500x345-guide.png",
@@ -163,7 +163,6 @@ with st.sidebar:
     st.markdown("### Export sizes")
     avatar_sizes = st.multiselect("Avatar", ["256x256", "500x345"], default=["256x256", "500x345"])
     hero_sizes   = st.multiselect("Hero",   ["1200x1165", "1500x920"], default=["1200x1165", "1500x920"])
-
     st.markdown("---")
     show_frame = st.toggle("Show crop frame (preview)", value=True)
     do_straight = st.toggle("Auto-straighten (eyes)", value=True)
@@ -253,16 +252,17 @@ def render_croppers(kind: str):
                 "bottom": int(B * sy),
             }
 
-        # Show cropper (fixed aspect ratio) — NOTE: image passed as first positional arg
-        aspect = (w_out, h_out)   # must be a 2-element tuple
-st_cropper(
-    work.convert("RGB"),
-    realtime_update=True,
-    aspect_ratio=aspect,
-    box_color='#FF2B2B',
-    return_type='box',
-    key=f"cropper_{kind}_{pn}_{s}",
-)
+        # Fixed-aspect cropper (PASS TUPLE, not float)
+        aspect_tuple = (w_out, h_out)
+        st.caption("Drag the rectangle to pan; use handles to scale. Live preview matches export.")
+        crop_box = st_cropper(
+            work.convert("RGB"),           # image as positional arg
+            realtime_update=True,
+            aspect_ratio=aspect_tuple,     # ✅ tuple: (width, height)
+            box_color='#FF2B2B',
+            return_type='box',
+            key=f"cropper_{kind}_{pn}_{s}",
+        )
 
         # If user moved the box, store it (working coords)
         if crop_box and all(k2 in crop_box for k2 in ("left", "top", "width", "height")):
