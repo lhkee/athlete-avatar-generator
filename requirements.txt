@@ -5,3 +5,4 @@ numpy==1.26.4
 mediapipe==0.10.14
 protobuf==4.25.3
 streamlit-cropper==0.2.2
+requests==2.32.3
